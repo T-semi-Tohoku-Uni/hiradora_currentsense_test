@@ -7,12 +7,18 @@ extern "C" {
 
 #include "stm32g4xx_hal.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #ifndef CONSOLE_TX_BUFFER_SIZE
 /* printfの文字列を一時的に保存する送信リングバッファのサイズ */
 #define CONSOLE_TX_BUFFER_SIZE 512U
+#endif
+
+#ifndef CONSOLE_RX_LINE_SIZE
+/* 改行文字と終端の'\0'を除き、最大63文字まで受信できます。 */
+#define CONSOLE_RX_LINE_SIZE 64U
 #endif
 
 /**
@@ -34,6 +40,16 @@ void Console_Init(UART_HandleTypeDef *huart);
  * 割り込み処理から呼んだ場合は、満杯になった時点で処理を終了します。
  */
 size_t Console_Write(const void *data, size_t length);
+
+/**
+ * @brief 受信した文字列をfloatへ変換し、指定された変数へ保存します。
+ * @param received_value 正常に受信した値の保存先
+ *
+ * mainループから繰り返し呼び出してください。新しい行を受信していなければ
+ * 何も行いません。文字列取得、数値変換、入力検証、結果表示は、この関数の
+ * 中で行います。
+ */
+void Console_Process(float *received_value);
 
 /**
  * @brief バッファ内の全データが送信されるまで待ちます。

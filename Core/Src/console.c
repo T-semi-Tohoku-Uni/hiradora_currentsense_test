@@ -1,9 +1,18 @@
 #include "console.h"
 
+#include <errno.h>
+#include <math.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #if (CONSOLE_TX_BUFFER_SIZE < 2U) || (CONSOLE_TX_BUFFER_SIZE > 65535U)
 #error "CONSOLE_TX_BUFFER_SIZE must be between 2 and 65535"
+#endif
+
+#if (CONSOLE_RX_LINE_SIZE < 2U) || (CONSOLE_RX_LINE_SIZE > 65535U)
+#error "CONSOLE_RX_LINE_SIZE must be between 2 and 65535"
 #endif
 
 /* Console_Init()で登録される、コンソール出力用のUARTです。 */
@@ -28,6 +37,21 @@ static volatile uint16_t tx_read_index;
  */
 static volatile uint16_t current_dma_length;
 static volatile uint8_t is_dma_transmitting;
+
+/*
+ * UART受信用の変数です。
+ *
+ * rx_byte             : 割り込みで1文字受け取る場所
+ * rx_line_buffer      : 改行までの文字列を保存する場所
+ * rx_line_length      : 現在保存されている文字数
+ * is_rx_line_ready    : 1行分の受信が完了したことを示すフラグ
+ * is_rx_line_overflow : 受信文字列が長すぎたことを示すフラグ
+ */
+static uint8_t rx_byte;
+static char rx_line_buffer[CONSOLE_RX_LINE_SIZE];
+static volatile uint16_t rx_line_length;
+static volatile uint8_t is_rx_line_ready;
+static volatile uint8_t is_rx_line_overflow;
 
 /**
  * @brief バッファに未送信データがあればDMA送信を開始します。
@@ -108,10 +132,19 @@ void Console_Init(UART_HandleTypeDef *huart)
   tx_read_index = 0U;
   current_dma_length = 0U;
   is_dma_transmitting = 0U;
+  rx_line_length = 0U;
+  is_rx_line_ready = 0U;
+  is_rx_line_overflow = 0U;
 
   if (interrupt_state == 0U)
   {
     __enable_irq();
+  }
+
+  /* 最初の1文字を割り込みで受信する準備をします。 */
+  if (console_uart != NULL)
+  {
+    (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
   }
 }
 
@@ -169,6 +202,105 @@ size_t Console_Write(const void *data, size_t length)
   }
 
   return written_length;
+}
+
+/**
+ * @brief 改行まで受信した文字列を取り出します。
+ * @return 1行受信済みならtrue、まだ受信中ならfalse
+ *
+ * この関数はconsole.c内部だけで使用します。末尾のCR/LFはコピーしません。
+ */
+static bool Console_ReadLine(char *destination, size_t destination_size)
+{
+  uint16_t received_length;
+  uint32_t interrupt_state;
+  bool has_received_line = false;
+
+  if ((destination == NULL) || (destination_size == 0U))
+  {
+    return false;
+  }
+
+  /*
+   * 受信完了割り込みがバッファを書き換えないようにしてから、
+   * 完成した1行を呼び出し元のバッファへコピーします。
+   */
+  interrupt_state = __get_PRIMASK();
+  __disable_irq();
+
+  if (is_rx_line_ready != 0U)
+  {
+    received_length = rx_line_length;
+
+    if ((size_t)received_length < destination_size)
+    {
+      memcpy(destination, rx_line_buffer, received_length);
+      destination[received_length] = '\0';
+    }
+    else
+    {
+      /* コピー先が小さい場合は、途中までの危険な値を返しません。 */
+      destination[0] = '\0';
+    }
+
+    /* 読み出しが終わったため、次の1行を受信できる状態へ戻します。 */
+    rx_line_length = 0U;
+    is_rx_line_ready = 0U;
+    is_rx_line_overflow = 0U;
+    has_received_line = true;
+  }
+
+  if (interrupt_state == 0U)
+  {
+    __enable_irq();
+  }
+
+  return has_received_line;
+}
+
+void Console_Process(float *received_value)
+{
+  char received_line[CONSOLE_RX_LINE_SIZE];
+  char *parse_end;
+  float parsed_value;
+
+  if (received_value == NULL)
+  {
+    return;
+  }
+
+  /* まだ改行まで受信していない場合は、すぐにmainループへ戻ります。 */
+  if (!Console_ReadLine(received_line, sizeof(received_line)))
+  {
+    return;
+  }
+
+  /* 受信文字列をfloatへ変換します。 */
+  errno = 0;
+  parsed_value = strtof(received_line, &parse_end);
+
+  /*
+   * 次の条件をすべて満たす場合だけ、呼び出し元の変数へ反映します。
+   *
+   * ・1文字以上を数値へ変換できた
+   * ・文字列の最後まで数値として解釈できた
+   * ・floatの表現範囲を超えていない
+   * ・NaNや無限大ではない
+   */
+  if ((parse_end != received_line) &&
+      (*parse_end == '\0') &&
+      (errno != ERANGE) &&
+      isfinite(parsed_value))
+  {
+    *received_value = parsed_value;
+    printf("received_value = %.3f\r\n", *received_value);
+  }
+  else
+  {
+    printf("Invalid value: %s\r\n", received_line);
+  }
+
+  printf("Input value:\r\n");
 }
 
 HAL_StatusTypeDef Console_Flush(uint32_t timeout_ms)
@@ -245,4 +377,72 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
   /* バッファに続きがあれば、次のDMA送信を開始します。 */
   Console_StartTransmit();
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart != console_uart)
+  {
+    return;
+  }
+
+  /*
+   * 1行をmain側が読み出すまでは、次のコマンドを保存しません。
+   * 今回は同時に複数行を送らない前提なので、1行バッファで十分です。
+   */
+  if (is_rx_line_ready == 0U)
+  {
+    if ((rx_byte == '\r') || (rx_byte == '\n'))
+    {
+      /* 空行は無視し、1文字以上受信した場合だけ受信完了とします。 */
+      if ((rx_line_length > 0U) || (is_rx_line_overflow != 0U))
+      {
+        if (is_rx_line_overflow != 0U)
+        {
+          /* 長すぎる行は空文字列にして、main側で入力エラーにします。 */
+          rx_line_length = 0U;
+        }
+
+        rx_line_buffer[rx_line_length] = '\0';
+        is_rx_line_ready = 1U;
+      }
+    }
+    else if (is_rx_line_overflow == 0U)
+    {
+      if (rx_line_length < (CONSOLE_RX_LINE_SIZE - 1U))
+      {
+        rx_line_buffer[rx_line_length] = (char)rx_byte;
+        rx_line_length++;
+      }
+      else
+      {
+        /* バッファに収まらない残りの文字は、改行まで読み捨てます。 */
+        is_rx_line_overflow = 1U;
+      }
+    }
+  }
+
+  /* 次の1文字を受信できるよう、毎回受信割り込みを再設定します。 */
+  (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart != console_uart)
+  {
+    return;
+  }
+
+  /* UARTエラーを含んだ入力途中の行は破棄します。 */
+  if (is_rx_line_ready == 0U)
+  {
+    rx_line_length = 0U;
+    is_rx_line_overflow = 0U;
+  }
+
+  /* オーバーランなどで受信が停止した場合だけ、割り込み受信を再開します。 */
+  if (huart->RxState == HAL_UART_STATE_READY)
+  {
+    (void)HAL_UART_Receive_IT(console_uart, &rx_byte, 1U);
+  }
 }

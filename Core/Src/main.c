@@ -48,6 +48,7 @@ UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
+static float received_value;
 
 /* USER CODE END PV */
 
@@ -101,8 +102,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Console_Init(&huart1);
   printf("Hello world!\r\n");
-  float current = 1.234f;
-  printf("current = %.3f A\r\n", (double)current);
+
+  printf("Input value:\r\n");
 
   /* USER CODE END 2 */
 
@@ -113,6 +114,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Console_Process(&received_value);
+
     HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
     HAL_Delay(500);
   }
