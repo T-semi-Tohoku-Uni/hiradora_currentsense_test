@@ -21,6 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "console.h"
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
@@ -97,6 +99,10 @@ int main(void)
   MX_TIM1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  Console_Init(&huart1);
+  printf("Hello world!\r\n");
+  float current = 1.234f;
+  printf("current = %.3f A\r\n", (double)current);
 
   /* USER CODE END 2 */
 
