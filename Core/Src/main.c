@@ -22,6 +22,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "console.h"
+#include "motor_control.h"
+#include "stspin32g4.h"
 #include <stdio.h>
 
 /* USER CODE END Includes */
@@ -42,6 +44,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c3;
+
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim4;
 
@@ -49,7 +53,7 @@ UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
-static float received_value;
+static char motor_command[CONSOLE_RX_LINE_SIZE];
 
 /* USER CODE END PV */
 
@@ -60,12 +64,25 @@ static void MX_DMA_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_I2C3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void PrintGateDriverStatus(const char *label, uint8_t status)
+{
+  printf("STSPIN32G4 STATUS %s: 0x%02X "
+         "[LOCK=%u RESET=%u VDS=%u THSD=%u VCC_UVLO=%u]\r\n",
+         label,
+         status,
+         (status & STSPIN32G4_STATUS_LOCK) != 0U,
+         (status & STSPIN32G4_STATUS_RESET) != 0U,
+         (status & STSPIN32G4_STATUS_VDS_PROTECTION) != 0U,
+         (status & STSPIN32G4_STATUS_THERMAL_SHUTDOWN) != 0U,
+         (status & STSPIN32G4_STATUS_VCC_UVLO) != 0U);
+}
 
 /* USER CODE END 0 */
 
@@ -102,12 +119,47 @@ int main(void)
   MX_TIM1_Init();
   MX_USART1_UART_Init();
   MX_TIM4_Init();
+  MX_I2C3_Init();
   /* USER CODE BEGIN 2 */
+  STSPIN32G4_FaultReport gate_driver_report;
+  HAL_StatusTypeDef gate_driver_result;
+
   Console_Init(&huart1);
-  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
-  printf("Hello world!\r\n");
-  printf("Input value:\r\n");
-  int count = 0;
+
+  /* The internal VCC buck soft-start is 3.3 ms according to the datasheet. */
+  HAL_Delay(5U);
+  gate_driver_result =
+    STSPIN32G4_CheckAndClearFaults(&hi2c3, &gate_driver_report);
+
+  if (gate_driver_result != HAL_OK)
+  {
+    printf("STSPIN32G4 I2C error: HAL status=%d, HAL error=0x%08lX\r\n",
+           (int)gate_driver_result,
+           (unsigned long)HAL_I2C_GetError(&hi2c3));
+    printf("Motor PWM remains disabled\r\n");
+  }
+  else
+  {
+    PrintGateDriverStatus("before clear", gate_driver_report.before_clear);
+    if (gate_driver_report.clear_requested)
+    {
+      PrintGateDriverStatus("after clear", gate_driver_report.after_clear);
+    }
+
+    if (STSPIN32G4_StatusHasFault(gate_driver_report.after_clear))
+    {
+      printf("Motor PWM remains disabled: gate-driver fault is still active\r\n");
+    }
+    else if (MotorControl_Init(&htim1) != HAL_OK)
+    {
+      Error_Handler();
+    }
+    else
+    {
+      printf("TIM1 three-phase PWM started at U=V=W=50.00 %%\r\n");
+      printf("Command: <offset>, u/v/w <offset>, mid, stop, start, status\r\n");
+    }
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -117,15 +169,11 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    Console_Process(&received_value);
-    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, (uint32_t)received_value);
-    count++;
-    if (count >= 100)
+    if (Console_ReadLine(motor_command, sizeof(motor_command)))
     {
-      count = 0;
+      (void)MotorControl_ProcessCommand(motor_command);
     }
-    printf(">count: %d\r\n", count);
-    HAL_Delay(100);
+    HAL_Delay(1);
   }
   /* USER CODE END 3 */
 }
@@ -176,6 +224,54 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief I2C3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C3_Init(void)
+{
+
+  /* USER CODE BEGIN I2C3_Init 0 */
+
+  /* USER CODE END I2C3_Init 0 */
+
+  /* USER CODE BEGIN I2C3_Init 1 */
+
+  /* USER CODE END I2C3_Init 1 */
+  hi2c3.Instance = I2C3;
+  hi2c3.Init.Timing = 0x30D29DE4;
+  hi2c3.Init.OwnAddress1 = 0;
+  hi2c3.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c3.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c3.Init.OwnAddress2 = 0;
+  hi2c3.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c3.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c3.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c3, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c3, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C3_Init 2 */
+
+  /* USER CODE END I2C3_Init 2 */
+
+}
+
+/**
   * @brief TIM1 Initialization Function
   * @param None
   * @retval None
@@ -197,11 +293,11 @@ static void MX_TIM1_Init(void)
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
-  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 65535;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
+  htim1.Init.Period = 3999;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
-  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
   {
     Error_Handler();
@@ -215,7 +311,7 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
   sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
@@ -244,7 +340,7 @@ static void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.DeadTime = 60;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.BreakFilter = 0;
@@ -403,6 +499,7 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 

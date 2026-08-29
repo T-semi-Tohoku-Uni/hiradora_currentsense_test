@@ -208,9 +208,9 @@ size_t Console_Write(const void *data, size_t length)
  * @brief 改行まで受信した文字列を取り出します。
  * @return 1行受信済みならtrue、まだ受信中ならfalse
  *
- * この関数はconsole.c内部だけで使用します。末尾のCR/LFはコピーしません。
+ * 末尾のCR/LFはコピーしません。
  */
-static bool Console_ReadLine(char *destination, size_t destination_size)
+bool Console_ReadLine(char *destination, size_t destination_size)
 {
   uint16_t received_length;
   uint32_t interrupt_state;
