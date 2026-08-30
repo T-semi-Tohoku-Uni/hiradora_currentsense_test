@@ -162,6 +162,101 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef* hi2c)
 }
 
 /**
+  * @brief OPAMP MSP Initialization
+  * This function configures the hardware resources used in this example
+  * @param hopamp: OPAMP handle pointer
+  * @retval None
+  */
+void HAL_OPAMP_MspInit(OPAMP_HandleTypeDef* hopamp)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  if(hopamp->Instance==OPAMP1)
+  {
+    /* USER CODE BEGIN OPAMP1_MspInit 0 */
+
+    /* USER CODE END OPAMP1_MspInit 0 */
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    /**OPAMP1 GPIO Configuration
+    PA1     ------> OPAMP1_VINP
+    PA3     ------> OPAMP1_VINM0
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_3;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    /* USER CODE BEGIN OPAMP1_MspInit 1 */
+
+    /* USER CODE END OPAMP1_MspInit 1 */
+  }
+  else if(hopamp->Instance==OPAMP2)
+  {
+    /* USER CODE BEGIN OPAMP2_MspInit 0 */
+
+    /* USER CODE END OPAMP2_MspInit 0 */
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    /**OPAMP2 GPIO Configuration
+    PA5     ------> OPAMP2_VINM0
+    PA7     ------> OPAMP2_VINP
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_5|GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    /* USER CODE BEGIN OPAMP2_MspInit 1 */
+
+    /* USER CODE END OPAMP2_MspInit 1 */
+  }
+
+}
+
+/**
+  * @brief OPAMP MSP De-Initialization
+  * This function freeze the hardware resources used in this example
+  * @param hopamp: OPAMP handle pointer
+  * @retval None
+  */
+void HAL_OPAMP_MspDeInit(OPAMP_HandleTypeDef* hopamp)
+{
+  if(hopamp->Instance==OPAMP1)
+  {
+    /* USER CODE BEGIN OPAMP1_MspDeInit 0 */
+
+    /* USER CODE END OPAMP1_MspDeInit 0 */
+
+    /**OPAMP1 GPIO Configuration
+    PA1     ------> OPAMP1_VINP
+    PA3     ------> OPAMP1_VINM0
+    */
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_1|GPIO_PIN_3);
+
+    /* USER CODE BEGIN OPAMP1_MspDeInit 1 */
+
+    /* USER CODE END OPAMP1_MspDeInit 1 */
+  }
+  else if(hopamp->Instance==OPAMP2)
+  {
+    /* USER CODE BEGIN OPAMP2_MspDeInit 0 */
+
+    /* USER CODE END OPAMP2_MspDeInit 0 */
+
+    /**OPAMP2 GPIO Configuration
+    PA5     ------> OPAMP2_VINM0
+    PA7     ------> OPAMP2_VINP
+    */
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_5|GPIO_PIN_7);
+
+    /* USER CODE BEGIN OPAMP2_MspDeInit 1 */
+
+    /* USER CODE END OPAMP2_MspDeInit 1 */
+  }
+
+}
+
+/**
   * @brief TIM_Base MSP Initialization
   * This function configures the hardware resources used in this example
   * @param htim_base: TIM_Base handle pointer

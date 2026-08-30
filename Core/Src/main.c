@@ -46,6 +46,9 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c3;
 
+OPAMP_HandleTypeDef hopamp1;
+OPAMP_HandleTypeDef hopamp2;
+
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim4;
 
@@ -65,6 +68,8 @@ static void MX_TIM1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_I2C3_Init(void);
+static void MX_OPAMP1_Init(void);
+static void MX_OPAMP2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -120,6 +125,8 @@ int main(void)
   MX_USART1_UART_Init();
   MX_TIM4_Init();
   MX_I2C3_Init();
+  MX_OPAMP1_Init();
+  MX_OPAMP2_Init();
   /* USER CODE BEGIN 2 */
   STSPIN32G4_FaultReport gate_driver_report;
   HAL_StatusTypeDef gate_driver_result;
@@ -268,6 +275,74 @@ static void MX_I2C3_Init(void)
   /* USER CODE BEGIN I2C3_Init 2 */
 
   /* USER CODE END I2C3_Init 2 */
+
+}
+
+/**
+  * @brief OPAMP1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_OPAMP1_Init(void)
+{
+
+  /* USER CODE BEGIN OPAMP1_Init 0 */
+
+  /* USER CODE END OPAMP1_Init 0 */
+
+  /* USER CODE BEGIN OPAMP1_Init 1 */
+
+  /* USER CODE END OPAMP1_Init 1 */
+  hopamp1.Instance = OPAMP1;
+  hopamp1.Init.PowerMode = OPAMP_POWERMODE_HIGHSPEED;
+  hopamp1.Init.Mode = OPAMP_PGA_MODE;
+  hopamp1.Init.NonInvertingInput = OPAMP_NONINVERTINGINPUT_IO0;
+  hopamp1.Init.InternalOutput = ENABLE;
+  hopamp1.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
+  hopamp1.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
+  hopamp1.Init.PgaGain = OPAMP_PGA_GAIN_16_OR_MINUS_15;
+  hopamp1.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
+  if (HAL_OPAMP_Init(&hopamp1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN OPAMP1_Init 2 */
+
+  /* USER CODE END OPAMP1_Init 2 */
+
+}
+
+/**
+  * @brief OPAMP2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_OPAMP2_Init(void)
+{
+
+  /* USER CODE BEGIN OPAMP2_Init 0 */
+
+  /* USER CODE END OPAMP2_Init 0 */
+
+  /* USER CODE BEGIN OPAMP2_Init 1 */
+
+  /* USER CODE END OPAMP2_Init 1 */
+  hopamp2.Instance = OPAMP2;
+  hopamp2.Init.PowerMode = OPAMP_POWERMODE_HIGHSPEED;
+  hopamp2.Init.Mode = OPAMP_PGA_MODE;
+  hopamp2.Init.NonInvertingInput = OPAMP_NONINVERTINGINPUT_IO0;
+  hopamp2.Init.InternalOutput = ENABLE;
+  hopamp2.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
+  hopamp2.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
+  hopamp2.Init.PgaGain = OPAMP_PGA_GAIN_16_OR_MINUS_15;
+  hopamp2.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
+  if (HAL_OPAMP_Init(&hopamp2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN OPAMP2_Init 2 */
+
+  /* USER CODE END OPAMP2_Init 2 */
 
 }
 
@@ -498,9 +573,9 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOF_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
