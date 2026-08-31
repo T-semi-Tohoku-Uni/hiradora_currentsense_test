@@ -11,12 +11,19 @@
 
 #define CURRENT_SENSE_CONSOLE_FLUSH_TIMEOUT_MS 15000U
 #define CURRENT_SENSE_ACQUISITION_TIMEOUT_MS 1000U
+#define CURRENT_SENSE_SLAVE_WAIT_LOOP_LIMIT 1024U
 
 typedef struct
 {
-  uint16_t u_raw;
-  uint16_t v_raw;
+  uint8_t byte0;
+  uint8_t byte1;
+  uint8_t byte2;
+  uint8_t byte3;
+  uint8_t byte4;
 } CurrentSenseSample;
+
+_Static_assert(sizeof(CurrentSenseSample) == 5U,
+               "CurrentSenseSample must remain packed to five bytes");
 
 typedef enum
 {
@@ -24,6 +31,7 @@ typedef enum
   CURRENT_SENSE_IDLE,
   CURRENT_SENSE_ACQUIRING,
   CURRENT_SENSE_DATA_READY,
+  CURRENT_SENSE_SYNC_ERROR,
   CURRENT_SENSE_TRANSMITTING
 } CurrentSenseState;
 
@@ -35,6 +43,37 @@ static volatile uint32_t captured_sample_count;
 static volatile CurrentSenseState current_state = CURRENT_SENSE_UNINITIALIZED;
 static uint32_t acquisition_start_tick;
 static bool timer_started_for_capture;
+
+/* Store three 12-bit values in five bytes so 5000 samples fit in 32 KiB RAM. */
+static void CurrentSense_StoreSample(CurrentSenseSample *sample,
+                                     uint16_t u_raw,
+                                     uint16_t v_raw,
+                                     uint16_t w_raw)
+{
+  sample->byte0 = (uint8_t)u_raw;
+  sample->byte1 = (uint8_t)((u_raw >> 8U) | (uint16_t)(v_raw << 4U));
+  sample->byte2 = (uint8_t)(v_raw >> 4U);
+  sample->byte3 = (uint8_t)w_raw;
+  sample->byte4 = (uint8_t)(w_raw >> 8U);
+}
+
+static uint16_t CurrentSense_GetURaw(const CurrentSenseSample *sample)
+{
+  return (uint16_t)((uint16_t)sample->byte0 |
+                    ((uint16_t)(sample->byte1 & 0x0FU) << 8U));
+}
+
+static uint16_t CurrentSense_GetVRaw(const CurrentSenseSample *sample)
+{
+  return (uint16_t)(((uint16_t)sample->byte1 >> 4U) |
+                    ((uint16_t)sample->byte2 << 4U));
+}
+
+static uint16_t CurrentSense_GetWRaw(const CurrentSenseSample *sample)
+{
+  return (uint16_t)((uint16_t)sample->byte3 |
+                    ((uint16_t)(sample->byte4 & 0x0FU) << 8U));
+}
 
 static void CurrentSense_DisableTrigger(void)
 {
@@ -114,8 +153,13 @@ static HAL_StatusTypeDef CurrentSense_StartAcquisition(void)
   captured_sample_count = 0U;
   current_state = CURRENT_SENSE_ACQUIRING;
 
-  /* In dual injected mode, the slave must be armed before the master. */
-  status = HAL_ADCEx_InjectedStart_IT(adc_slave);
+  /*
+   * In dual injected mode, the slave must be armed before the master.
+   * Do not use the slave HAL interrupt: because its JSQR has no independent
+   * external trigger, HAL disables JEOSIE after the first slave sequence.
+   */
+  __HAL_ADC_DISABLE_IT(adc_slave, ADC_IT_JEOC | ADC_IT_JEOS);
+  status = HAL_ADCEx_InjectedStart(adc_slave);
   if (status != HAL_OK)
   {
     CurrentSense_DisableTrigger();
@@ -126,7 +170,7 @@ static HAL_StatusTypeDef CurrentSense_StartAcquisition(void)
   status = HAL_ADCEx_InjectedStart_IT(adc_master);
   if (status != HAL_OK)
   {
-    (void)HAL_ADCEx_InjectedStop_IT(adc_slave);
+    (void)HAL_ADCEx_InjectedStop(adc_slave);
     CurrentSense_DisableTrigger();
     current_state = CURRENT_SENSE_IDLE;
     return status;
@@ -148,7 +192,7 @@ static HAL_StatusTypeDef CurrentSense_StopAcquisition(void)
   {
     result = HAL_ERROR;
   }
-  if (HAL_ADCEx_InjectedStop_IT(adc_slave) != HAL_OK)
+  if (HAL_ADCEx_InjectedStop(adc_slave) != HAL_OK)
   {
     result = HAL_ERROR;
   }
@@ -158,8 +202,8 @@ static HAL_StatusTypeDef CurrentSense_StopAcquisition(void)
 
 static void CurrentSense_SendCsv(void)
 {
-  static const char csv_header[] = "sample,u_raw,v_raw\r\n";
-  char line[32];
+  static const char csv_header[] = "sample,u_raw,v_raw,w_raw\r\n";
+  char line[40];
   uint32_t index;
 
   (void)Console_Write(csv_header, sizeof(csv_header) - 1U);
@@ -168,10 +212,11 @@ static void CurrentSense_SendCsv(void)
   {
     const int length = snprintf(line,
                                 sizeof(line),
-                                "%lu,%u,%u\r\n",
+                                "%lu,%u,%u,%u\r\n",
                                 (unsigned long)index,
-                                (unsigned int)samples[index].u_raw,
-                                (unsigned int)samples[index].v_raw);
+                                (unsigned int)CurrentSense_GetURaw(&samples[index]),
+                                (unsigned int)CurrentSense_GetVRaw(&samples[index]),
+                                (unsigned int)CurrentSense_GetWRaw(&samples[index]));
 
     if ((length > 0) && ((size_t)length < sizeof(line)))
     {
@@ -186,10 +231,11 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
                                     ADC_HandleTypeDef *slave_adc,
                                     OPAMP_HandleTypeDef *u_opamp,
                                     OPAMP_HandleTypeDef *v_opamp,
+                                    OPAMP_HandleTypeDef *w_opamp,
                                     TIM_HandleTypeDef *trigger_timer)
 {
   if ((master_adc == NULL) || (slave_adc == NULL) ||
-      (u_opamp == NULL) || (v_opamp == NULL) ||
+      (u_opamp == NULL) || (v_opamp == NULL) || (w_opamp == NULL) ||
       (trigger_timer == NULL) ||
       (master_adc->Instance != ADC1) || (slave_adc->Instance != ADC2) ||
       (trigger_timer->Instance != TIM1))
@@ -215,6 +261,12 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
   }
   if (HAL_OPAMP_Start(v_opamp) != HAL_OK)
   {
+    (void)HAL_OPAMP_Stop(u_opamp);
+    return HAL_ERROR;
+  }
+  if (HAL_OPAMP_Start(w_opamp) != HAL_OK)
+  {
+    (void)HAL_OPAMP_Stop(v_opamp);
     (void)HAL_OPAMP_Stop(u_opamp);
     return HAL_ERROR;
   }
@@ -261,6 +313,22 @@ bool CurrentSense_ProcessCommand(const char *command)
 
 void CurrentSense_Task(void)
 {
+  if (current_state == CURRENT_SENSE_SYNC_ERROR)
+  {
+    const uint32_t adc2_isr = adc_slave->Instance->ISR;
+    const uint32_t adc2_ier = adc_slave->Instance->IER;
+
+    current_state = CURRENT_SENSE_TRANSMITTING;
+    (void)CurrentSense_StopAcquisition();
+    printf("ADC capture synchronization failed: samples=%lu, "
+           "ADC2_ISR=0x%08lX, ADC2_IER=0x%08lX\r\n",
+           (unsigned long)captured_sample_count,
+           (unsigned long)adc2_isr,
+           (unsigned long)adc2_ier);
+    current_state = CURRENT_SENSE_IDLE;
+    return;
+  }
+
   if (current_state == CURRENT_SENSE_ACQUIRING)
   {
     if ((HAL_GetTick() - acquisition_start_tick) <
@@ -275,19 +343,21 @@ void CurrentSense_Task(void)
     const uint32_t adc1_ier = adc_master->Instance->IER;
     const uint32_t adc2_isr = adc_slave->Instance->ISR;
     const uint32_t adc2_cr = adc_slave->Instance->CR;
+    const uint32_t adc2_ier = adc_slave->Instance->IER;
 
     current_state = CURRENT_SENSE_TRANSMITTING;
     (void)CurrentSense_StopAcquisition();
     printf("ADC capture timed out: samples=%lu, TIM1_CNT=%lu, "
            "ADC1_ISR=0x%08lX, ADC1_CR=0x%08lX, ADC1_IER=0x%08lX, "
-           "ADC2_ISR=0x%08lX, ADC2_CR=0x%08lX\r\n",
+           "ADC2_ISR=0x%08lX, ADC2_CR=0x%08lX, ADC2_IER=0x%08lX\r\n",
            (unsigned long)captured_sample_count,
            (unsigned long)timer_count,
            (unsigned long)adc1_isr,
            (unsigned long)adc1_cr,
            (unsigned long)adc1_ier,
            (unsigned long)adc2_isr,
-           (unsigned long)adc2_cr);
+           (unsigned long)adc2_cr,
+           (unsigned long)adc2_ier);
     current_state = CURRENT_SENSE_IDLE;
     return;
   }
@@ -314,15 +384,39 @@ bool CurrentSense_IsBusy(void)
 {
   return ((current_state == CURRENT_SENSE_ACQUIRING) ||
           (current_state == CURRENT_SENSE_DATA_READY) ||
+          (current_state == CURRENT_SENSE_SYNC_ERROR) ||
           (current_state == CURRENT_SENSE_TRANSMITTING));
 }
 
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
   uint32_t index;
+  uint16_t u_raw;
+  uint16_t v_raw;
+  uint16_t w_raw;
+  uint32_t wait_count;
 
   if ((hadc != adc_master) || (current_state != CURRENT_SENSE_ACQUIRING))
   {
+    return;
+  }
+
+  /*
+   * ADC1 completes U while ADC2 is still converting W in rank 2. Wait for
+   * ADC2 JEOS before reading the three result registers. This normally takes
+   * less than one microsecond and avoids the one-shot slave HAL interrupt.
+   */
+  wait_count = CURRENT_SENSE_SLAVE_WAIT_LOOP_LIMIT;
+  while ((__HAL_ADC_GET_FLAG(adc_slave, ADC_FLAG_JEOS) == 0U) &&
+         (wait_count > 0U))
+  {
+    wait_count--;
+  }
+
+  if (wait_count == 0U)
+  {
+    __HAL_ADC_DISABLE_IT(adc_master, ADC_IT_JEOC | ADC_IT_JEOS);
+    current_state = CURRENT_SENSE_SYNC_ERROR;
     return;
   }
 
@@ -332,10 +426,13 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     return;
   }
 
-  samples[index].u_raw =
+  u_raw =
     (uint16_t)HAL_ADCEx_InjectedGetValue(adc_master, ADC_INJECTED_RANK_1);
-  samples[index].v_raw =
+  v_raw =
     (uint16_t)HAL_ADCEx_InjectedGetValue(adc_slave, ADC_INJECTED_RANK_1);
+  w_raw =
+    (uint16_t)HAL_ADCEx_InjectedGetValue(adc_slave, ADC_INJECTED_RANK_2);
+  CurrentSense_StoreSample(&samples[index], u_raw, v_raw, w_raw);
   __HAL_ADC_CLEAR_FLAG(adc_slave, ADC_FLAG_JEOC | ADC_FLAG_JEOS);
 
   index++;

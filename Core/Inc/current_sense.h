@@ -12,7 +12,7 @@ extern "C" {
 #define CURRENT_SENSE_SAMPLE_COUNT 5000U
 
 /**
- * @brief Prepare the OPAMPs and calibrate both ADCs.
+ * @brief Prepare the three OPAMPs and calibrate both ADCs.
  *
  * ADC1 is expected to be the master and ADC2 the slave of the injected
  * simultaneous conversion configured by CubeMX.
@@ -21,6 +21,7 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
                                     ADC_HandleTypeDef *slave_adc,
                                     OPAMP_HandleTypeDef *u_opamp,
                                     OPAMP_HandleTypeDef *v_opamp,
+                                    OPAMP_HandleTypeDef *w_opamp,
                                     TIM_HandleTypeDef *trigger_timer);
 
 /**

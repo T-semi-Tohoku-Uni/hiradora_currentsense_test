@@ -52,6 +52,7 @@ I2C_HandleTypeDef hi2c3;
 
 OPAMP_HandleTypeDef hopamp1;
 OPAMP_HandleTypeDef hopamp2;
+OPAMP_HandleTypeDef hopamp3;
 
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim4;
@@ -76,6 +77,7 @@ static void MX_OPAMP1_Init(void);
 static void MX_OPAMP2_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_ADC2_Init(void);
+static void MX_OPAMP3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -135,6 +137,7 @@ int main(void)
   MX_OPAMP2_Init();
   MX_ADC1_Init();
   MX_ADC2_Init();
+  MX_OPAMP3_Init();
   /* USER CODE BEGIN 2 */
   STSPIN32G4_FaultReport gate_driver_report;
   HAL_StatusTypeDef gate_driver_result;
@@ -145,6 +148,7 @@ int main(void)
                         &hadc2,
                         &hopamp1,
                         &hopamp2,
+                        &hopamp3,
                         &htim1) != HAL_OK)
   {
     printf("Current-sense initialization failed\r\n");
@@ -355,8 +359,8 @@ static void MX_ADC2_Init(void)
   hadc2.Init.Resolution = ADC_RESOLUTION_12B;
   hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc2.Init.GainCompensation = 0;
-  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc2.Init.ScanConvMode = ADC_SCAN_ENABLE;
+  hadc2.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   hadc2.Init.LowPowerAutoWait = DISABLE;
   hadc2.Init.ContinuousConvMode = DISABLE;
   hadc2.Init.NbrOfConversion = 1;
@@ -377,11 +381,20 @@ static void MX_ADC2_Init(void)
   sConfigInjected.InjectedSingleDiff = ADC_SINGLE_ENDED;
   sConfigInjected.InjectedOffsetNumber = ADC_OFFSET_NONE;
   sConfigInjected.InjectedOffset = 0;
-  sConfigInjected.InjectedNbrOfConversion = 1;
+  sConfigInjected.InjectedNbrOfConversion = 2;
   sConfigInjected.InjectedDiscontinuousConvMode = DISABLE;
   sConfigInjected.AutoInjectedConv = DISABLE;
   sConfigInjected.QueueInjectedContext = DISABLE;
   sConfigInjected.InjecOversamplingMode = DISABLE;
+  if (HAL_ADCEx_InjectedConfigChannel(&hadc2, &sConfigInjected) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Injected Channel
+  */
+  sConfigInjected.InjectedChannel = ADC_CHANNEL_VOPAMP3_ADC2;
+  sConfigInjected.InjectedRank = ADC_INJECTED_RANK_2;
   if (HAL_ADCEx_InjectedConfigChannel(&hadc2, &sConfigInjected) != HAL_OK)
   {
     Error_Handler();
@@ -509,6 +522,40 @@ static void MX_OPAMP2_Init(void)
 }
 
 /**
+  * @brief OPAMP3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_OPAMP3_Init(void)
+{
+
+  /* USER CODE BEGIN OPAMP3_Init 0 */
+
+  /* USER CODE END OPAMP3_Init 0 */
+
+  /* USER CODE BEGIN OPAMP3_Init 1 */
+
+  /* USER CODE END OPAMP3_Init 1 */
+  hopamp3.Instance = OPAMP3;
+  hopamp3.Init.PowerMode = OPAMP_POWERMODE_HIGHSPEED;
+  hopamp3.Init.Mode = OPAMP_PGA_MODE;
+  hopamp3.Init.NonInvertingInput = OPAMP_NONINVERTINGINPUT_IO0;
+  hopamp3.Init.InternalOutput = ENABLE;
+  hopamp3.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
+  hopamp3.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
+  hopamp3.Init.PgaGain = OPAMP_PGA_GAIN_16_OR_MINUS_15;
+  hopamp3.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
+  if (HAL_OPAMP_Init(&hopamp3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN OPAMP3_Init 2 */
+
+  /* USER CODE END OPAMP3_Init 2 */
+
+}
+
+/**
   * @brief TIM1 Initialization Function
   * @param None
   * @retval None
@@ -574,7 +621,6 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 3998;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
   {
@@ -742,9 +788,9 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
