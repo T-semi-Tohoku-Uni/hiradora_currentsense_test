@@ -45,6 +45,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/console.c
+    Core/Src/current_sense.c
     Core/Src/motor_control.c
     Core/Src/stspin32g4.c
 )

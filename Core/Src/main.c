@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "console.h"
+#include "current_sense.h"
 #include "motor_control.h"
 #include "stspin32g4.h"
 #include <stdio.h>
@@ -140,6 +141,17 @@ int main(void)
 
   Console_Init(&huart1);
 
+  if (CurrentSense_Init(&hadc1,
+                        &hadc2,
+                        &hopamp1,
+                        &hopamp2,
+                        &htim1) != HAL_OK)
+  {
+    printf("Current-sense initialization failed\r\n");
+    (void)Console_Flush(1000U);
+    Error_Handler();
+  }
+
   /* The internal VCC buck soft-start is 3.3 ms according to the datasheet. */
   HAL_Delay(5U);
   gate_driver_result =
@@ -171,7 +183,7 @@ int main(void)
     else
     {
       printf("TIM1 three-phase PWM started at U=V=W=50.00 %%\r\n");
-      printf("Command: <offset>, u/v/w <offset>, mid, stop, start, status\r\n");
+      printf("Command: <offset>, u/v/w <offset>, mid, stop, start, status, adc\r\n");
     }
   }
   /* USER CODE END 2 */
@@ -183,9 +195,15 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if (Console_ReadLine(motor_command, sizeof(motor_command)))
+    CurrentSense_Task();
+
+    if (!CurrentSense_IsBusy() &&
+        Console_ReadLine(motor_command, sizeof(motor_command)))
     {
-      (void)MotorControl_ProcessCommand(motor_command);
+      if (!CurrentSense_ProcessCommand(motor_command))
+      {
+        (void)MotorControl_ProcessCommand(motor_command);
+      }
     }
     HAL_Delay(1);
   }
@@ -530,10 +548,6 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_TIM_OC_Init(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
@@ -560,9 +574,9 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 3998;
-  if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
   }
