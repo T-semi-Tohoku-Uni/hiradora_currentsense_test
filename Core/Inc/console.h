@@ -58,6 +58,12 @@ void Console_Process(float *received_value);
  */
 HAL_StatusTypeDef Console_Flush(uint32_t timeout_ms);
 
+/**
+ * @brief Copy one completed UART input line into the caller's buffer.
+ * @return true when a line was copied, otherwise false.
+ */
+bool Console_ReadLine(char *destination, size_t destination_size);
+
 #ifdef __cplusplus
 }
 #endif
