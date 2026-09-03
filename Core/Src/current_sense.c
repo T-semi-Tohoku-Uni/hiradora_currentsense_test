@@ -20,10 +20,11 @@ typedef struct
   uint8_t byte2;
   uint8_t byte3;
   uint8_t byte4;
+  uint8_t byte5;
 } CurrentSenseSample;
 
-_Static_assert(sizeof(CurrentSenseSample) == 5U,
-               "CurrentSenseSample must remain packed to five bytes");
+_Static_assert(sizeof(CurrentSenseSample) == 6U,
+               "CurrentSenseSample must remain packed to six bytes");
 
 typedef enum
 {
@@ -44,20 +45,24 @@ static volatile CurrentSenseState current_state = CURRENT_SENSE_UNINITIALIZED;
 static uint32_t acquisition_start_tick;
 static bool timer_started_for_capture;
 
-/* Store three 12-bit values in five bytes so 5000 samples fit in 32 KiB RAM. */
+/* Store four 12-bit values in six bytes so 4000 samples fit in 32 KiB RAM. */
 static void CurrentSense_StoreSample(CurrentSenseSample *sample,
-                                     uint16_t u_raw,
+                                     uint16_t u1_raw,
                                      uint16_t v_raw,
+                                     uint16_t u2_raw,
                                      uint16_t w_raw)
 {
-  sample->byte0 = (uint8_t)u_raw;
-  sample->byte1 = (uint8_t)((u_raw >> 8U) | (uint16_t)(v_raw << 4U));
+  sample->byte0 = (uint8_t)u1_raw;
+  sample->byte1 =
+    (uint8_t)((u1_raw >> 8U) | (uint16_t)(v_raw << 4U));
   sample->byte2 = (uint8_t)(v_raw >> 4U);
-  sample->byte3 = (uint8_t)w_raw;
-  sample->byte4 = (uint8_t)(w_raw >> 8U);
+  sample->byte3 = (uint8_t)u2_raw;
+  sample->byte4 =
+    (uint8_t)((u2_raw >> 8U) | (uint16_t)(w_raw << 4U));
+  sample->byte5 = (uint8_t)(w_raw >> 4U);
 }
 
-static uint16_t CurrentSense_GetURaw(const CurrentSenseSample *sample)
+static uint16_t CurrentSense_GetU1Raw(const CurrentSenseSample *sample)
 {
   return (uint16_t)((uint16_t)sample->byte0 |
                     ((uint16_t)(sample->byte1 & 0x0FU) << 8U));
@@ -70,6 +75,12 @@ static uint16_t CurrentSense_GetVRaw(const CurrentSenseSample *sample)
 }
 
 static uint16_t CurrentSense_GetWRaw(const CurrentSenseSample *sample)
+{
+  return (uint16_t)(((uint16_t)sample->byte4 >> 4U) |
+                    ((uint16_t)sample->byte5 << 4U));
+}
+
+static uint16_t CurrentSense_GetU2Raw(const CurrentSenseSample *sample)
 {
   return (uint16_t)((uint16_t)sample->byte3 |
                     ((uint16_t)(sample->byte4 & 0x0FU) << 8U));
@@ -202,7 +213,8 @@ static HAL_StatusTypeDef CurrentSense_StopAcquisition(void)
 
 static void CurrentSense_SendCsv(void)
 {
-  static const char csv_header[] = "sample,u_raw,v_raw,w_raw\r\n";
+  static const char csv_header[] =
+    "sample,u1_raw,v_raw,u2_raw,w_raw\r\n";
   char line[40];
   uint32_t index;
 
@@ -212,10 +224,11 @@ static void CurrentSense_SendCsv(void)
   {
     const int length = snprintf(line,
                                 sizeof(line),
-                                "%lu,%u,%u,%u\r\n",
+                                "%lu,%u,%u,%u,%u\r\n",
                                 (unsigned long)index,
-                                (unsigned int)CurrentSense_GetURaw(&samples[index]),
+                                (unsigned int)CurrentSense_GetU1Raw(&samples[index]),
                                 (unsigned int)CurrentSense_GetVRaw(&samples[index]),
+                                (unsigned int)CurrentSense_GetU2Raw(&samples[index]),
                                 (unsigned int)CurrentSense_GetWRaw(&samples[index]));
 
     if ((length > 0) && ((size_t)length < sizeof(line)))
@@ -391,8 +404,9 @@ bool CurrentSense_IsBusy(void)
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
   uint32_t index;
-  uint16_t u_raw;
+  uint16_t u1_raw;
   uint16_t v_raw;
+  uint16_t u2_raw;
   uint16_t w_raw;
   uint32_t wait_count;
 
@@ -402,9 +416,9 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
   }
 
   /*
-   * ADC1 completes U while ADC2 is still converting W in rank 2. Wait for
-   * ADC2 JEOS before reading the three result registers. This normally takes
-   * less than one microsecond and avoids the one-shot slave HAL interrupt.
+   * The ADC1 JEOS interrupt indicates that its two-rank sequence is complete.
+   * Also confirm ADC2 JEOS before reading all four result registers. This
+   * avoids relying on the one-shot slave HAL interrupt.
    */
   wait_count = CURRENT_SENSE_SLAVE_WAIT_LOOP_LIMIT;
   while ((__HAL_ADC_GET_FLAG(adc_slave, ADC_FLAG_JEOS) == 0U) &&
@@ -426,13 +440,19 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     return;
   }
 
-  u_raw =
+  u1_raw =
     (uint16_t)HAL_ADCEx_InjectedGetValue(adc_master, ADC_INJECTED_RANK_1);
   v_raw =
     (uint16_t)HAL_ADCEx_InjectedGetValue(adc_slave, ADC_INJECTED_RANK_1);
+  u2_raw =
+    (uint16_t)HAL_ADCEx_InjectedGetValue(adc_master, ADC_INJECTED_RANK_2);
   w_raw =
     (uint16_t)HAL_ADCEx_InjectedGetValue(adc_slave, ADC_INJECTED_RANK_2);
-  CurrentSense_StoreSample(&samples[index], u_raw, v_raw, w_raw);
+  CurrentSense_StoreSample(&samples[index],
+                           u1_raw,
+                           v_raw,
+                           u2_raw,
+                           w_raw);
   __HAL_ADC_CLEAR_FLAG(adc_slave, ADC_FLAG_JEOC | ADC_FLAG_JEOS);
 
   index++;

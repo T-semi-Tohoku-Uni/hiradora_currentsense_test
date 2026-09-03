@@ -9,7 +9,7 @@ extern "C" {
 
 #include <stdbool.h>
 
-#define CURRENT_SENSE_SAMPLE_COUNT 5000U
+#define CURRENT_SENSE_SAMPLE_COUNT 4000U
 
 /**
  * @brief Prepare the three OPAMPs and calibrate both ADCs.

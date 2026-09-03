@@ -27,32 +27,34 @@
 
 | コマンド | 動作 | 例 |
 |---|---|---|
-| `adc` | TIM1_CH4に同期してU/V/W相のADC raw値を5000組取得し、取得完了後にCSVを連続送信 | `adc` |
+| `adc` | TIM1_CH4に同期してU相を2回、V/W相を各1回、4000組取得し、取得完了後にCSVを連続送信 | `adc` |
 
 `adc`を受信すると、まず次の開始メッセージを返します。
 
 ```text
-ADC capture started: 5000 samples
+ADC capture started: 4000 samples
 ```
 
-取得完了後、次のヘッダーと5000行のCSVデータを連続送信します。
+取得完了後、次のヘッダーと4000行のCSVデータを連続送信します。
 
 ```csv
-sample,u_raw,v_raw,w_raw
-0,2048,2051,2049
-1,2047,2050,2048
+sample,u1_raw,v_raw,u2_raw,w_raw
+0,2048,2051,2047,2049
+1,2047,2050,2046,2048
 ```
 
-- `sample`は0～4999の取得順番号です。
-- `u_raw`はADC1（VOPAMP1）、`v_raw`はADC2 Rank 1（VOPAMP2）、
-  `w_raw`はADC2 Rank 2（VOPAMP3）の12bit raw値です。
-- U/V相は同時に変換され、W相はその直後に変換されます。
+- `sample`は0～3999の取得順番号です。
+- `u1_raw`はADC1 Rank 1（VOPAMP1）、`v_raw`はADC2 Rank 1（VOPAMP2）、
+  `u2_raw`はADC1 Rank 2（VOPAMP1）、`w_raw`はADC2 Rank 2
+  （VOPAMP3）の12bit raw値です。
+- `u1_raw`/`v_raw`は同時に変換され、その直後に`u2_raw`/`w_raw`が
+  同時に変換されます。
 - PWM動作中・停止中のどちらでも取得できます。
 - PWM停止中はU/V/Wの出力をOFFのままTIM1をADCトリガ専用に一時動作させ、
   取得後にTIM1も停止状態へ戻します。このときの値は主にゼロ電流時の
   オフセット確認用です。
-- 20kHz PWM時の取得時間は約0.25秒です。
-- 115200bpsでのCSV送信には値によって約10～11秒かかります。
+- 20kHz PWM時の取得時間は約0.20秒です。
+- 115200bpsでのCSV送信には値によって約9～10秒かかります。
 - CSV送信が終わるまで、次のコマンドは送信しないでください。
 
 ## 入力値について

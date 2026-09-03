@@ -1,16 +1,23 @@
 #MicroXplorer Configuration settings - do not modify
 ADC1.CommonPathInternal=null|null|null|null
+ADC1.EOCSelection=ADC_EOC_SEQ_CONV
 ADC1.EnableInjectedConversion=ENABLE
+ADC1.EnableInjectedOversampling=DISABLE
 ADC1.EnableRegularConversion=DISABLE
 ADC1.ExternalTrigInjecConv=ADC_EXTERNALTRIGINJEC_T1_CC4
-ADC1.IPParameters=master,Mode,EnableInjectedConversion,InjectedRank-4\#ChannelInjectedConversion,InjectedChannel-4\#ChannelInjectedConversion,Rank1_Channel,InjectedSamplingTime-4\#ChannelInjectedConversion,InjectedOffsetNumber-4\#ChannelInjectedConversion,InjNumberOfConversion,ExternalTrigInjecConv,EnableRegularConversion,CommonPathInternal
-ADC1.InjNumberOfConversion=1
+ADC1.IPParameters=master,Mode,EnableInjectedConversion,InjectedRank-4\#ChannelInjectedConversion,InjectedChannel-4\#ChannelInjectedConversion,Rank1_Channel,InjectedSamplingTime-4\#ChannelInjectedConversion,InjectedOffsetNumber-4\#ChannelInjectedConversion,InjNumberOfConversion,ExternalTrigInjecConv,EnableRegularConversion,EnableInjectedOversampling,InjectedRank-5\#ChannelInjectedConversion,InjectedChannel-5\#ChannelInjectedConversion,Rank2_Channel,InjectedSamplingTime-5\#ChannelInjectedConversion,InjectedOffsetNumber-5\#ChannelInjectedConversion,EOCSelection,CommonPathInternal
+ADC1.InjNumberOfConversion=2
 ADC1.InjectedChannel-4\#ChannelInjectedConversion=ADC_CHANNEL_VOPAMP1
+ADC1.InjectedChannel-5\#ChannelInjectedConversion=ADC_CHANNEL_VOPAMP1
 ADC1.InjectedOffsetNumber-4\#ChannelInjectedConversion=ADC_OFFSET_NONE
+ADC1.InjectedOffsetNumber-5\#ChannelInjectedConversion=ADC_OFFSET_NONE
 ADC1.InjectedRank-4\#ChannelInjectedConversion=1
+ADC1.InjectedRank-5\#ChannelInjectedConversion=2
 ADC1.InjectedSamplingTime-4\#ChannelInjectedConversion=ADC_SAMPLETIME_12CYCLES_5
+ADC1.InjectedSamplingTime-5\#ChannelInjectedConversion=ADC_SAMPLETIME_12CYCLES_5
 ADC1.Mode=ADC_DUALMODE_INJECSIMULT
 ADC1.Rank1_Channel=ADC_CHANNEL_VOPAMP1
+ADC1.Rank2_Channel=ADC_CHANNEL_VOPAMP1
 ADC1.master=1
 ADC2.CommonPathInternal=null|null|null|null
 ADC2.EOCSelection=ADC_EOC_SEQ_CONV
