@@ -6,13 +6,9 @@ extern "C" {
 #endif
 
 #include "stm32g4xx_hal.h"
+#include "motor_control_config.h"
 
 #include <stdbool.h>
-
-/* Maximum permitted deviation from the 50% midpoint duty. */
-#ifndef MOTOR_CONTROL_MAX_DUTY_OFFSET_PERCENT
-#define MOTOR_CONTROL_MAX_DUTY_OFFSET_PERCENT 10.0f
-#endif
 
 typedef enum
 {
@@ -38,14 +34,30 @@ HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim);
  *   mid         Return all phases to 50%.
  *   stop        Disable all TIM1 PWM outputs.
  *   start       Restart all phases at 50%.
+ *   run cw <rpm>    Start clockwise open-loop six-step drive.
+ *   run ccw <rpm>   Start counter-clockwise open-loop six-step drive.
  *   status      Print the current state.
  *
  * @return true when the command was valid, otherwise false.
  */
 bool MotorControl_ProcessCommand(const char *command);
 
+/**
+ * @brief Process only the emergency "stop" command.
+ * @return true when a stop command was handled.
+ */
+bool MotorControl_ProcessStopCommand(const char *command);
+
 /** @brief Immediately disable all main and complementary PWM outputs. */
 void MotorControl_Stop(void);
+
+/**
+ * @brief Return the active six-step sector (1 through 6), or 0 otherwise.
+ *
+ * The value is updated atomically with each commutation and can be sampled
+ * from the ADC interrupt.
+ */
+uint8_t MotorControl_GetSector(void);
 
 #ifdef __cplusplus
 }

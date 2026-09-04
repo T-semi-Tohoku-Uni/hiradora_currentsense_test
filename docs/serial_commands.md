@@ -21,7 +21,24 @@
 | `mid` | U/V/W相をすべて50%へ戻す | `mid` |
 | `stop` | TIM1のメイン出力と補完出力を停止 | `stop` |
 | `start` | U/V/W相をすべて50%にしてPWMを再開 | `start` |
-| `status` | PWMの動作状態、選択中の相、Duty差分を表示 | `status` |
+| `run cw <rpm>` | CW方向へオープンループ120度駆動を開始 | `run cw 600` |
+| `run ccw <rpm>` | CCW方向へオープンループ120度駆動を開始 | `run ccw 600` |
+| `status` | PWMの動作状態、回転数指令、現在のDutyなどを表示 | `status` |
+
+`run`では位置合わせ後、開始回転数から指定回転数まで加速します。Dutyは指令中の
+回転数に連動して増加します。極対数、位置合わせDuty、開始Duty、Duty上昇率、
+最大Duty、位置合わせ時間、加速時間、開始回転数、指令可能範囲は
+`Core/Inc/motor_control_config.h`で変更できます。Duty設定の単位は0.1%です。
+
+現在の設定では、位置合わせと60 rpmで5.0%、120 rpmで5.7%、240 rpmで7.0%と
+なり、180 rpm上昇するごとにDutyを2.0%増やします。最大Dutyは20.0%、位置合わせは
+200 ms、加速は6 s、開始回転数は60 rpm、指令範囲は60～3000 rpmです。
+逆起電力による同期確認は行わないため、負荷や加速条件によっては脱調します。
+`status`に表示される`reference`は転流周期から計算した指令値であり、実測回転数
+ではありません。`duty`は現在TIM1へ適用しているDutyです。
+`run`の直後に`adc`を送ると位置合わせまたは加速中のデータになります。指定した
+回転数で取得する場合は、現在の設定では6.2秒以上待ってから`adc`を送ってください。
+CW/CCWと実際の回転方向の対応はモーター相の配線順によって逆になることがあります。
 
 ## ADC取得コマンド
 
@@ -38,12 +55,14 @@ ADC capture started: 4000 samples
 取得完了後、次のヘッダーと4000行のCSVデータを連続送信します。
 
 ```csv
-sample,u1_raw,v_raw,u2_raw,w_raw
-0,2048,2051,2047,2049
-1,2047,2050,2046,2048
+sample,sector,u1_raw,v_raw,u2_raw,w_raw
+0,1,2048,2051,2047,2049
+1,1,2047,2050,2046,2048
 ```
 
 - `sample`は0～3999の取得順番号です。
+- `sector`は120度駆動中の通電ステップ番号1～6です。停止中および従来の
+  手動PWMモードでは0です。
 - `u1_raw`はADC1 Rank 1（VOPAMP1）、`v_raw`はADC2 Rank 1（VOPAMP2）、
   `u2_raw`はADC1 Rank 2（VOPAMP1）、`w_raw`はADC2 Rank 2
   （VOPAMP3）の12bit raw値です。
@@ -55,7 +74,8 @@ sample,u1_raw,v_raw,u2_raw,w_raw
   オフセット確認用です。
 - 20kHz PWM時の取得時間は約0.20秒です。
 - 115200bpsでのCSV送信には値によって約9～10秒かかります。
-- CSV送信が終わるまで、次のコマンドは送信しないでください。
+- ADC取得中およびCSV送信中は緊急停止用の`stop`だけを受け付けます。
+  CSV送信は分割処理されるため、送信中も120度駆動の転流は継続します。
 
 ## 入力値について
 
@@ -64,12 +84,16 @@ sample,u1_raw,v_raw,u2_raw,w_raw
 - 起動時に選択されている相はU相です。
 - 相を指定せず数値だけを送ると、最後に選択した相へ適用されます。
 - 現在の許容範囲は`-10.0`～`+10.0`です。
-- 許容範囲は`Core/Inc/motor_control.h`の
+- 許容範囲は`Core/Inc/motor_control_config.h`の
   `MOTOR_CONTROL_MAX_DUTY_OFFSET_PERCENT`で変更できます。
 
 ## 入力例
 
 ```text
+run cw 600
+status
+adc
+stop
 u 2.5
 status
 v -4

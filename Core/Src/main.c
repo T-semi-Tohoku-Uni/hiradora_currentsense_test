@@ -187,7 +187,8 @@ int main(void)
     else
     {
       printf("TIM1 three-phase PWM started at U=V=W=50.00 %%\r\n");
-      printf("Command: <offset>, u/v/w <offset>, mid, stop, start, status, adc\r\n");
+      printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
+             "run cw/ccw <rpm>, status, adc\r\n");
     }
   }
   /* USER CODE END 2 */
@@ -201,10 +202,16 @@ int main(void)
     /* USER CODE BEGIN 3 */
     CurrentSense_Task();
 
-    if (!CurrentSense_IsBusy() &&
-        Console_ReadLine(motor_command, sizeof(motor_command)))
+    if (Console_ReadLine(motor_command, sizeof(motor_command)))
     {
-      if (!CurrentSense_ProcessCommand(motor_command))
+      if (CurrentSense_IsBusy())
+      {
+        if (!MotorControl_ProcessStopCommand(motor_command))
+        {
+          printf("ADC capture/transfer is busy; only 'stop' is accepted\r\n");
+        }
+      }
+      else if (!CurrentSense_ProcessCommand(motor_command))
       {
         (void)MotorControl_ProcessCommand(motor_command);
       }

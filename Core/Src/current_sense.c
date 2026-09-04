@@ -1,9 +1,11 @@
 #include "current_sense.h"
 
 #include "console.h"
+#include "motor_control.h"
 
 #include <ctype.h>
 #include <stdio.h>
+#include <string.h>
 
 #define CURRENT_SENSE_PWM_OUTPUT_MASK                                  \
   (TIM_CCER_CC1E | TIM_CCER_CC1NE | TIM_CCER_CC2E | TIM_CCER_CC2NE | \
@@ -12,6 +14,9 @@
 #define CURRENT_SENSE_CONSOLE_FLUSH_TIMEOUT_MS 15000U
 #define CURRENT_SENSE_ACQUISITION_TIMEOUT_MS 1000U
 #define CURRENT_SENSE_SLAVE_WAIT_LOOP_LIMIT 1024U
+#define CURRENT_SENSE_SECTOR_BITS 3U
+#define CURRENT_SENSE_SECTOR_BUFFER_SIZE \
+  ((CURRENT_SENSE_SAMPLE_COUNT * CURRENT_SENSE_SECTOR_BITS + 7U) / 8U)
 
 typedef struct
 {
@@ -40,9 +45,11 @@ static ADC_HandleTypeDef *adc_master;
 static ADC_HandleTypeDef *adc_slave;
 static TIM_HandleTypeDef *sample_timer;
 static CurrentSenseSample samples[CURRENT_SENSE_SAMPLE_COUNT];
+static uint8_t sample_sectors[CURRENT_SENSE_SECTOR_BUFFER_SIZE];
 static volatile uint32_t captured_sample_count;
 static volatile CurrentSenseState current_state = CURRENT_SENSE_UNINITIALIZED;
 static uint32_t acquisition_start_tick;
+static uint32_t transmit_sample_index;
 static bool timer_started_for_capture;
 
 /* Store four 12-bit values in six bytes so 4000 samples fit in 32 KiB RAM. */
@@ -84,6 +91,39 @@ static uint16_t CurrentSense_GetU2Raw(const CurrentSenseSample *sample)
 {
   return (uint16_t)((uint16_t)sample->byte3 |
                     ((uint16_t)(sample->byte4 & 0x0FU) << 8U));
+}
+
+static void CurrentSense_StoreSector(uint32_t index, uint8_t sector)
+{
+  const uint32_t bit_index = index * CURRENT_SENSE_SECTOR_BITS;
+  const uint32_t byte_index = bit_index / 8U;
+  const uint32_t bit_offset = bit_index % 8U;
+  const uint16_t packed_sector =
+    (uint16_t)((uint16_t)(sector & 0x07U) << bit_offset);
+
+  sample_sectors[byte_index] |= (uint8_t)packed_sector;
+  if ((bit_offset > 5U) &&
+      ((byte_index + 1U) < CURRENT_SENSE_SECTOR_BUFFER_SIZE))
+  {
+    sample_sectors[byte_index + 1U] |= (uint8_t)(packed_sector >> 8U);
+  }
+}
+
+static uint8_t CurrentSense_GetSector(uint32_t index)
+{
+  const uint32_t bit_index = index * CURRENT_SENSE_SECTOR_BITS;
+  const uint32_t byte_index = bit_index / 8U;
+  const uint32_t bit_offset = bit_index % 8U;
+  uint16_t packed_sector = sample_sectors[byte_index];
+
+  if ((bit_offset > 5U) &&
+      ((byte_index + 1U) < CURRENT_SENSE_SECTOR_BUFFER_SIZE))
+  {
+    packed_sector |= (uint16_t)((uint16_t)sample_sectors[byte_index + 1U]
+                                << 8U);
+  }
+
+  return (uint8_t)((packed_sector >> bit_offset) & 0x07U);
 }
 
 static void CurrentSense_DisableTrigger(void)
@@ -162,6 +202,7 @@ static HAL_StatusTypeDef CurrentSense_StartAcquisition(void)
   }
 
   captured_sample_count = 0U;
+  memset(sample_sectors, 0, sizeof(sample_sectors));
   current_state = CURRENT_SENSE_ACQUIRING;
 
   /*
@@ -211,21 +252,27 @@ static HAL_StatusTypeDef CurrentSense_StopAcquisition(void)
   return result;
 }
 
-static void CurrentSense_SendCsv(void)
+static void CurrentSense_BeginCsv(void)
 {
   static const char csv_header[] =
-    "sample,u1_raw,v_raw,u2_raw,w_raw\r\n";
-  char line[40];
-  uint32_t index;
+    "sample,sector,u1_raw,v_raw,u2_raw,w_raw\r\n";
 
+  transmit_sample_index = 0U;
   (void)Console_Write(csv_header, sizeof(csv_header) - 1U);
+}
 
-  for (index = 0U; index < CURRENT_SENSE_SAMPLE_COUNT; index++)
+static bool CurrentSense_SendNextCsvLine(void)
+{
+  char line[40];
+
+  if (transmit_sample_index < CURRENT_SENSE_SAMPLE_COUNT)
   {
+    const uint32_t index = transmit_sample_index;
     const int length = snprintf(line,
                                 sizeof(line),
-                                "%lu,%u,%u,%u,%u\r\n",
+                                "%lu,%u,%u,%u,%u,%u\r\n",
                                 (unsigned long)index,
+                                (unsigned int)CurrentSense_GetSector(index),
                                 (unsigned int)CurrentSense_GetU1Raw(&samples[index]),
                                 (unsigned int)CurrentSense_GetVRaw(&samples[index]),
                                 (unsigned int)CurrentSense_GetU2Raw(&samples[index]),
@@ -235,9 +282,13 @@ static void CurrentSense_SendCsv(void)
     {
       (void)Console_Write(line, (size_t)length);
     }
+
+    transmit_sample_index++;
+    return false;
   }
 
   (void)Console_Flush(CURRENT_SENSE_CONSOLE_FLUSH_TIMEOUT_MS);
+  return true;
 }
 
 HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
@@ -285,6 +336,7 @@ HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
   }
 
   captured_sample_count = 0U;
+  transmit_sample_index = 0U;
   timer_started_for_capture = false;
   current_state = CURRENT_SENSE_IDLE;
   return HAL_OK;
@@ -375,6 +427,15 @@ void CurrentSense_Task(void)
     return;
   }
 
+  if (current_state == CURRENT_SENSE_TRANSMITTING)
+  {
+    if (CurrentSense_SendNextCsvLine())
+    {
+      current_state = CURRENT_SENSE_IDLE;
+    }
+    return;
+  }
+
   if (current_state != CURRENT_SENSE_DATA_READY)
   {
     return;
@@ -389,8 +450,7 @@ void CurrentSense_Task(void)
     return;
   }
 
-  CurrentSense_SendCsv();
-  current_state = CURRENT_SENSE_IDLE;
+  CurrentSense_BeginCsv();
 }
 
 bool CurrentSense_IsBusy(void)
@@ -453,6 +513,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
                            v_raw,
                            u2_raw,
                            w_raw);
+  CurrentSense_StoreSector(index, MotorControl_GetSector());
   __HAL_ADC_CLEAR_FLAG(adc_slave, ADC_FLAG_JEOC | ADC_FLAG_JEOS);
 
   index++;

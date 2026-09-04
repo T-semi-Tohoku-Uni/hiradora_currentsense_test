@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,10 +11,71 @@
   (TIM_CCER_CC1E | TIM_CCER_CC1NE | TIM_CCER_CC2E | TIM_CCER_CC2NE |    \
    TIM_CCER_CC3E | TIM_CCER_CC3NE)
 
+#define MOTOR_CONTROL_PHASE_U_OUTPUTS (TIM_CCER_CC1E | TIM_CCER_CC1NE)
+#define MOTOR_CONTROL_PHASE_V_OUTPUTS (TIM_CCER_CC2E | TIM_CCER_CC2NE)
+#define MOTOR_CONTROL_PHASE_W_OUTPUTS (TIM_CCER_CC3E | TIM_CCER_CC3NE)
+
+#if (MOTOR_CONTROL_POLE_PAIRS == 0U)
+#error "MOTOR_CONTROL_POLE_PAIRS must be greater than zero"
+#endif
+
+#if ((MOTOR_CONTROL_ALIGNMENT_DUTY_X10 == 0U) || \
+     (MOTOR_CONTROL_ALIGNMENT_DUTY_X10 >= 1000U))
+#error "MOTOR_CONTROL_ALIGNMENT_DUTY_X10 must be between 1 and 999"
+#endif
+
+#if ((MOTOR_CONTROL_RUN_START_DUTY_X10 == 0U) || \
+     (MOTOR_CONTROL_RUN_START_DUTY_X10 > MOTOR_CONTROL_MAX_DUTY_X10))
+#error "MOTOR_CONTROL_RUN_START_DUTY_X10 must be between 1 and MAX_DUTY_X10"
+#endif
+
+#if ((MOTOR_CONTROL_MAX_DUTY_X10 == 0U) || \
+     (MOTOR_CONTROL_MAX_DUTY_X10 >= 1000U))
+#error "MOTOR_CONTROL_MAX_DUTY_X10 must be between 1 and 999"
+#endif
+
+#if (MOTOR_CONTROL_DUTY_RISE_RPM == 0U)
+#error "MOTOR_CONTROL_DUTY_RISE_RPM must be greater than zero"
+#endif
+
+#if (MOTOR_CONTROL_MIN_TARGET_RPM < MOTOR_CONTROL_START_RPM)
+#error "MOTOR_CONTROL_MIN_TARGET_RPM must not be below START_RPM"
+#endif
+
+#if (MOTOR_CONTROL_MAX_TARGET_RPM < MOTOR_CONTROL_MIN_TARGET_RPM)
+#error "MOTOR_CONTROL_MAX_TARGET_RPM must not be below MIN_TARGET_RPM"
+#endif
+
+typedef enum
+{
+  MOTOR_CONTROL_MODE_STOPPED = 0,
+  MOTOR_CONTROL_MODE_MANUAL,
+  MOTOR_CONTROL_MODE_SIX_STEP_ALIGNMENT,
+  MOTOR_CONTROL_MODE_SIX_STEP_RAMP,
+  MOTOR_CONTROL_MODE_SIX_STEP_RUNNING
+} MotorControlMode;
+
+typedef enum
+{
+  MOTOR_CONTROL_DIRECTION_CW = 0,
+  MOTOR_CONTROL_DIRECTION_CCW
+} MotorControlDirection;
+
 static TIM_HandleTypeDef *motor_timer;
 static MotorControlPhase selected_phase = MOTOR_CONTROL_PHASE_U;
 static float selected_offset_percent;
 static bool outputs_enabled;
+static volatile MotorControlMode motor_mode = MOTOR_CONTROL_MODE_STOPPED;
+static volatile uint8_t current_sector;
+static volatile uint32_t reference_rpm;
+static volatile uint32_t current_duty_x10;
+static MotorControlDirection six_step_direction;
+static uint32_t target_rpm;
+static uint32_t control_tick_hz;
+static uint32_t alignment_ticks_remaining;
+static uint32_t ramp_elapsed_ticks;
+static uint32_t ramp_total_ticks;
+static uint32_t commutation_accumulator;
 
 static const char *MotorControl_SkipSpaces(const char *text)
 {
@@ -44,6 +106,54 @@ static const char *MotorControl_PhaseName(MotorControlPhase phase)
 {
   static const char *const phase_names[] = {"U", "V", "W"};
   return phase_names[(unsigned int)phase];
+}
+
+static const char *MotorControl_DirectionName(MotorControlDirection direction)
+{
+  return (direction == MOTOR_CONTROL_DIRECTION_CW) ? "CW" : "CCW";
+}
+
+static const char *MotorControl_SixStepStageName(MotorControlMode mode)
+{
+  if (mode == MOTOR_CONTROL_MODE_SIX_STEP_ALIGNMENT)
+  {
+    return "alignment";
+  }
+  if (mode == MOTOR_CONTROL_MODE_SIX_STEP_RAMP)
+  {
+    return "ramp";
+  }
+  return "running";
+}
+
+static bool MotorControl_IsSixStepMode(MotorControlMode mode)
+{
+  return ((mode == MOTOR_CONTROL_MODE_SIX_STEP_ALIGNMENT) ||
+          (mode == MOTOR_CONTROL_MODE_SIX_STEP_RAMP) ||
+          (mode == MOTOR_CONTROL_MODE_SIX_STEP_RUNNING));
+}
+
+static uint32_t MotorControl_GetControlTickHz(void)
+{
+  RCC_ClkInitTypeDef clock_config;
+  uint32_t flash_latency;
+  uint32_t timer_clock_hz = HAL_RCC_GetPCLK2Freq();
+  const uint32_t timer_divider = motor_timer->Instance->PSC + 1U;
+  const uint32_t half_period_counts = motor_timer->Instance->ARR + 1U;
+
+  HAL_RCC_GetClockConfig(&clock_config, &flash_latency);
+  if (clock_config.APB2CLKDivider != RCC_HCLK_DIV1)
+  {
+    timer_clock_hz *= 2U;
+  }
+
+  return timer_clock_hz / (2U * timer_divider * half_period_counts);
+}
+
+static uint32_t MotorControl_MillisecondsToTicks(uint32_t milliseconds)
+{
+  return (uint32_t)((((uint64_t)control_tick_hz * milliseconds) + 999U) /
+                    1000U);
 }
 
 static uint32_t MotorControl_MidpointCompare(void)
@@ -82,6 +192,11 @@ static void MotorControl_StartAtMidpoint(void)
   SET_BIT(tim->CR1, TIM_CR1_CEN);
   SET_BIT(tim->BDTR, TIM_BDTR_MOE);
 
+  current_sector = 0U;
+  reference_rpm = 0U;
+  current_duty_x10 = 0U;
+  motor_mode = MOTOR_CONTROL_MODE_MANUAL;
+
   if (interrupt_state == 0U)
   {
     __enable_irq();
@@ -89,6 +204,300 @@ static void MotorControl_StartAtMidpoint(void)
 
   selected_offset_percent = 0.0f;
   outputs_enabled = true;
+}
+
+static uint32_t MotorControl_RunDutyX10(uint32_t rpm)
+{
+  uint64_t duty_x10 = MOTOR_CONTROL_RUN_START_DUTY_X10;
+
+  if (rpm > MOTOR_CONTROL_START_RPM)
+  {
+    const uint32_t rpm_above_start = rpm - MOTOR_CONTROL_START_RPM;
+
+    duty_x10 += (((uint64_t)rpm_above_start *
+                  MOTOR_CONTROL_DUTY_RISE_X10) +
+                 (MOTOR_CONTROL_DUTY_RISE_RPM / 2U)) /
+                MOTOR_CONTROL_DUTY_RISE_RPM;
+  }
+
+  if (duty_x10 > MOTOR_CONTROL_MAX_DUTY_X10)
+  {
+    duty_x10 = MOTOR_CONTROL_MAX_DUTY_X10;
+  }
+
+  return (uint32_t)duty_x10;
+}
+
+static uint32_t MotorControl_SixStepDutyX10(void)
+{
+  if (motor_mode == MOTOR_CONTROL_MODE_SIX_STEP_ALIGNMENT)
+  {
+    return MOTOR_CONTROL_ALIGNMENT_DUTY_X10;
+  }
+
+  return MotorControl_RunDutyX10(reference_rpm);
+}
+
+static uint32_t MotorControl_SixStepCompare(uint32_t duty_x10)
+{
+  uint32_t compare =
+    (uint32_t)((((uint64_t)(__HAL_TIM_GET_AUTORELOAD(motor_timer) + 1U) *
+                 duty_x10) + 500U) / 1000U);
+
+  if (compare == 0U)
+  {
+    compare = 1U;
+  }
+  return compare;
+}
+
+static void MotorControl_ApplySixStepSector(uint8_t sector)
+{
+  TIM_TypeDef *tim = motor_timer->Instance;
+  const uint32_t duty_x10 = MotorControl_SixStepDutyX10();
+  const uint32_t pwm_compare = MotorControl_SixStepCompare(duty_x10);
+  uint32_t output_mask;
+  uint32_t u_compare = 0U;
+  uint32_t v_compare = 0U;
+  uint32_t w_compare = 0U;
+  uint32_t interrupt_state;
+
+  switch (sector)
+  {
+    case 1U: /* U high, V low, W floating. */
+      u_compare = pwm_compare;
+      output_mask = MOTOR_CONTROL_PHASE_U_OUTPUTS |
+                    MOTOR_CONTROL_PHASE_V_OUTPUTS;
+      break;
+
+    case 2U: /* U high, W low, V floating. */
+      u_compare = pwm_compare;
+      output_mask = MOTOR_CONTROL_PHASE_U_OUTPUTS |
+                    MOTOR_CONTROL_PHASE_W_OUTPUTS;
+      break;
+
+    case 3U: /* V high, W low, U floating. */
+      v_compare = pwm_compare;
+      output_mask = MOTOR_CONTROL_PHASE_V_OUTPUTS |
+                    MOTOR_CONTROL_PHASE_W_OUTPUTS;
+      break;
+
+    case 4U: /* V high, U low, W floating. */
+      v_compare = pwm_compare;
+      output_mask = MOTOR_CONTROL_PHASE_V_OUTPUTS |
+                    MOTOR_CONTROL_PHASE_U_OUTPUTS;
+      break;
+
+    case 5U: /* W high, U low, V floating. */
+      w_compare = pwm_compare;
+      output_mask = MOTOR_CONTROL_PHASE_W_OUTPUTS |
+                    MOTOR_CONTROL_PHASE_U_OUTPUTS;
+      break;
+
+    case 6U: /* W high, V low, U floating. */
+      w_compare = pwm_compare;
+      output_mask = MOTOR_CONTROL_PHASE_W_OUTPUTS |
+                    MOTOR_CONTROL_PHASE_V_OUTPUTS;
+      break;
+
+    default:
+      return;
+  }
+
+  interrupt_state = __get_PRIMASK();
+  __disable_irq();
+
+  /* Blank all phases while preload values and output enables are changed. */
+  CLEAR_BIT(tim->BDTR, TIM_BDTR_MOE);
+  CLEAR_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
+
+  __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_1, u_compare);
+  __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_2, v_compare);
+  __HAL_TIM_SET_COMPARE(motor_timer, TIM_CHANNEL_3, w_compare);
+  tim->EGR = TIM_EGR_UG;
+  __HAL_TIM_CLEAR_FLAG(motor_timer, TIM_FLAG_UPDATE);
+
+  SET_BIT(tim->CCER, output_mask);
+  SET_BIT(tim->CR1, TIM_CR1_CEN);
+  SET_BIT(tim->BDTR, TIM_BDTR_MOE);
+  current_sector = sector;
+  current_duty_x10 = duty_x10;
+
+  if (interrupt_state == 0U)
+  {
+    __enable_irq();
+  }
+}
+
+static void MotorControl_AdvanceSector(void)
+{
+  uint8_t next_sector = current_sector;
+
+  if (six_step_direction == MOTOR_CONTROL_DIRECTION_CW)
+  {
+    next_sector = (next_sector >= 6U) ? 1U : (uint8_t)(next_sector + 1U);
+  }
+  else
+  {
+    next_sector = (next_sector <= 1U) ? 6U : (uint8_t)(next_sector - 1U);
+  }
+
+  MotorControl_ApplySixStepSector(next_sector);
+}
+
+static void MotorControl_SixStepTick(void)
+{
+  uint32_t phase_threshold;
+
+  if (motor_mode == MOTOR_CONTROL_MODE_SIX_STEP_ALIGNMENT)
+  {
+    if (alignment_ticks_remaining > 0U)
+    {
+      alignment_ticks_remaining--;
+      return;
+    }
+
+    reference_rpm = MOTOR_CONTROL_START_RPM;
+    ramp_elapsed_ticks = 0U;
+    commutation_accumulator = 0U;
+    motor_mode = (target_rpm == MOTOR_CONTROL_START_RPM) ?
+                 MOTOR_CONTROL_MODE_SIX_STEP_RUNNING :
+                 MOTOR_CONTROL_MODE_SIX_STEP_RAMP;
+  }
+
+  if (motor_mode == MOTOR_CONTROL_MODE_SIX_STEP_RAMP)
+  {
+    if (ramp_elapsed_ticks < ramp_total_ticks)
+    {
+      const uint32_t rpm_delta = target_rpm - MOTOR_CONTROL_START_RPM;
+
+      ramp_elapsed_ticks++;
+      reference_rpm = MOTOR_CONTROL_START_RPM +
+        (uint32_t)(((uint64_t)rpm_delta * ramp_elapsed_ticks) /
+                   ramp_total_ticks);
+    }
+    else
+    {
+      reference_rpm = target_rpm;
+      motor_mode = MOTOR_CONTROL_MODE_SIX_STEP_RUNNING;
+    }
+  }
+
+  phase_threshold = control_tick_hz * 10U;
+  commutation_accumulator += reference_rpm * MOTOR_CONTROL_POLE_PAIRS;
+  if (commutation_accumulator >= phase_threshold)
+  {
+    commutation_accumulator -= phase_threshold;
+    MotorControl_AdvanceSector();
+  }
+}
+
+static void MotorControl_StartSixStep(MotorControlDirection direction,
+                                      uint32_t requested_rpm)
+{
+  TIM_TypeDef *tim = motor_timer->Instance;
+  const uint32_t target_duty_x10 = MotorControl_RunDutyX10(requested_rpm);
+  uint32_t interrupt_state = __get_PRIMASK();
+
+  __disable_irq();
+  CLEAR_BIT(tim->BDTR, TIM_BDTR_MOE);
+  CLEAR_BIT(tim->CR1, TIM_CR1_CEN);
+  CLEAR_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
+
+  six_step_direction = direction;
+  target_rpm = requested_rpm;
+  reference_rpm = 0U;
+  current_sector = 0U;
+  alignment_ticks_remaining =
+    MotorControl_MillisecondsToTicks(MOTOR_CONTROL_ALIGNMENT_TIME_MS);
+  ramp_elapsed_ticks = 0U;
+  ramp_total_ticks =
+    MotorControl_MillisecondsToTicks(MOTOR_CONTROL_ACCELERATION_TIME_MS);
+  commutation_accumulator = 0U;
+  outputs_enabled = true;
+  motor_mode = MOTOR_CONTROL_MODE_SIX_STEP_ALIGNMENT;
+  __HAL_TIM_SET_COUNTER(motor_timer, 0U);
+
+  if (interrupt_state == 0U)
+  {
+    __enable_irq();
+  }
+
+  MotorControl_ApplySixStepSector(1U);
+
+  printf("Six-step started: direction=%s, target=%lu rpm, "
+         "duty_start=%lu.%lu %%, duty_target=%lu.%lu %%, "
+         "alignment=%u ms, ramp=%u ms\r\n",
+         MotorControl_DirectionName(direction),
+         (unsigned long)requested_rpm,
+         (unsigned long)(MOTOR_CONTROL_RUN_START_DUTY_X10 / 10U),
+         (unsigned long)(MOTOR_CONTROL_RUN_START_DUTY_X10 % 10U),
+         (unsigned long)(target_duty_x10 / 10U),
+         (unsigned long)(target_duty_x10 % 10U),
+         (unsigned int)MOTOR_CONTROL_ALIGNMENT_TIME_MS,
+         (unsigned int)MOTOR_CONTROL_ACCELERATION_TIME_MS);
+}
+
+static bool MotorControl_ParseRunCommand(const char *command)
+{
+  const char *argument;
+  char *parse_end;
+  unsigned long parsed_rpm;
+  MotorControlDirection direction;
+
+  if ((tolower((unsigned char)command[0]) != 'r') ||
+      (tolower((unsigned char)command[1]) != 'u') ||
+      (tolower((unsigned char)command[2]) != 'n') ||
+      ((command[3] != '\0') &&
+       (isspace((unsigned char)command[3]) == 0)))
+  {
+    return false;
+  }
+
+  argument = MotorControl_SkipSpaces(&command[3]);
+  if ((tolower((unsigned char)argument[0]) == 'c') &&
+      (tolower((unsigned char)argument[1]) == 'w') &&
+      (isspace((unsigned char)argument[2]) != 0))
+  {
+    direction = MOTOR_CONTROL_DIRECTION_CW;
+    argument = MotorControl_SkipSpaces(&argument[2]);
+  }
+  else if ((tolower((unsigned char)argument[0]) == 'c') &&
+           (tolower((unsigned char)argument[1]) == 'c') &&
+           (tolower((unsigned char)argument[2]) == 'w') &&
+           (isspace((unsigned char)argument[3]) != 0))
+  {
+    direction = MOTOR_CONTROL_DIRECTION_CCW;
+    argument = MotorControl_SkipSpaces(&argument[3]);
+  }
+  else
+  {
+    printf("Usage: run cw <rpm> or run ccw <rpm>\r\n");
+    return true;
+  }
+
+  if (isdigit((unsigned char)*argument) == 0)
+  {
+    printf("Usage: run cw <rpm> or run ccw <rpm>\r\n");
+    return true;
+  }
+
+  errno = 0;
+  parsed_rpm = strtoul(argument, &parse_end, 10);
+  parse_end = (char *)MotorControl_SkipSpaces(parse_end);
+  if ((errno == ERANGE) || (parsed_rpm > UINT32_MAX) ||
+      (*parse_end != '\0') ||
+      (parsed_rpm < MOTOR_CONTROL_MIN_TARGET_RPM) ||
+      (parsed_rpm > MOTOR_CONTROL_MAX_TARGET_RPM))
+  {
+    printf("RPM must be between %u and %u\r\n",
+           (unsigned int)MOTOR_CONTROL_MIN_TARGET_RPM,
+           (unsigned int)MOTOR_CONTROL_MAX_TARGET_RPM);
+    return true;
+  }
+
+  MotorControl_StartSixStep(direction, (uint32_t)parsed_rpm);
+  return true;
 }
 
 static bool MotorControl_ParseOffset(const char *text, float *offset_percent)
@@ -168,14 +577,24 @@ HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim)
   if ((htim == NULL) ||
       !IS_TIM_CCXN_INSTANCE(htim->Instance, TIM_CHANNEL_3) ||
       (MOTOR_CONTROL_MAX_DUTY_OFFSET_PERCENT <= 0.0f) ||
-      (MOTOR_CONTROL_MAX_DUTY_OFFSET_PERCENT >= 50.0f))
+      (MOTOR_CONTROL_MAX_DUTY_OFFSET_PERCENT >= 50.0f) ||
+      (MOTOR_CONTROL_MAX_TARGET_RPM < MOTOR_CONTROL_START_RPM) ||
+      (MOTOR_CONTROL_ACCELERATION_TIME_MS == 0U))
   {
     return HAL_ERROR;
   }
 
   motor_timer = htim;
+  control_tick_hz = MotorControl_GetControlTickHz();
+  if (control_tick_hz == 0U)
+  {
+    return HAL_ERROR;
+  }
+
   selected_phase = MOTOR_CONTROL_PHASE_U;
   MotorControl_StartAtMidpoint();
+  __HAL_TIM_CLEAR_FLAG(motor_timer, TIM_FLAG_UPDATE);
+  __HAL_TIM_ENABLE_IT(motor_timer, TIM_IT_UPDATE);
   return HAL_OK;
 }
 
@@ -191,6 +610,11 @@ bool MotorControl_ProcessCommand(const char *command)
   }
 
   command = MotorControl_SkipSpaces(command);
+
+  if (MotorControl_ParseRunCommand(command))
+  {
+    return true;
+  }
 
   if (MotorControl_IsCommand(command, "stop"))
   {
@@ -208,6 +632,12 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (MotorControl_IsCommand(command, "mid"))
   {
+    if (MotorControl_IsSixStepMode(motor_mode))
+    {
+      printf("Manual PWM is unavailable during six-step drive; send 'stop' "
+             "or 'start' first\r\n");
+      return true;
+    }
     if (!outputs_enabled)
     {
       printf("PWM is stopped; send 'start' first\r\n");
@@ -221,10 +651,26 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (MotorControl_IsCommand(command, "status"))
   {
-    printf("PWM: %s, selected=%s, offset=%+.2f %%\r\n",
-           outputs_enabled ? "running" : "stopped",
-           MotorControl_PhaseName(selected_phase),
-           selected_offset_percent);
+    if (MotorControl_IsSixStepMode(motor_mode))
+    {
+      printf("PWM: six-step, stage=%s, direction=%s, target=%lu rpm, "
+             "reference=%lu rpm, sector=%u, duty=%lu.%lu %%\r\n",
+             MotorControl_SixStepStageName(motor_mode),
+             MotorControl_DirectionName(six_step_direction),
+             (unsigned long)target_rpm,
+             (unsigned long)reference_rpm,
+             (unsigned int)current_sector,
+             (unsigned long)(current_duty_x10 / 10U),
+             (unsigned long)(current_duty_x10 % 10U));
+    }
+    else
+    {
+      printf("PWM: %s, mode=%s, selected=%s, offset=%+.2f %%\r\n",
+             outputs_enabled ? "running" : "stopped",
+             (motor_mode == MOTOR_CONTROL_MODE_MANUAL) ? "manual" : "off",
+             MotorControl_PhaseName(selected_phase),
+             selected_offset_percent);
+    }
     return true;
   }
 
@@ -246,8 +692,16 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (!MotorControl_ParseOffset(argument, &offset_percent))
   {
-    printf("Invalid command. Use: <offset>, u/v/w <offset>, mid, stop, start, status\r\n");
+    printf("Invalid command. Use: <offset>, u/v/w <offset>, mid, stop, "
+           "start, run cw/ccw <rpm>, status\r\n");
     return false;
+  }
+
+  if (MotorControl_IsSixStepMode(motor_mode))
+  {
+    printf("Manual PWM is unavailable during six-step drive; send 'stop' "
+           "or 'start' first\r\n");
+    return true;
   }
 
   if (!outputs_enabled)
@@ -257,6 +711,24 @@ bool MotorControl_ProcessCommand(const char *command)
   }
 
   MotorControl_ApplyOffset(command_phase, offset_percent);
+  return true;
+}
+
+bool MotorControl_ProcessStopCommand(const char *command)
+{
+  if ((motor_timer == NULL) || (command == NULL))
+  {
+    return false;
+  }
+
+  command = MotorControl_SkipSpaces(command);
+  if (!MotorControl_IsCommand(command, "stop"))
+  {
+    return false;
+  }
+
+  MotorControl_Stop();
+  printf("PWM stopped\r\n");
   return true;
 }
 
@@ -276,10 +748,37 @@ void MotorControl_Stop(void)
   CLEAR_BIT(motor_timer->Instance->CR1, TIM_CR1_CEN);
   CLEAR_BIT(motor_timer->Instance->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
 
+  current_sector = 0U;
+  reference_rpm = 0U;
+  current_duty_x10 = 0U;
+  motor_mode = MOTOR_CONTROL_MODE_STOPPED;
+
   if (interrupt_state == 0U)
   {
     __enable_irq();
   }
 
   outputs_enabled = false;
+}
+
+uint8_t MotorControl_GetSector(void)
+{
+  return current_sector;
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if ((htim != motor_timer) || !MotorControl_IsSixStepMode(motor_mode))
+  {
+    return;
+  }
+
+  /* In center-aligned mode, process only the update event at counter bottom. */
+  if (__HAL_TIM_GET_COUNTER(motor_timer) >
+      (__HAL_TIM_GET_AUTORELOAD(motor_timer) / 2U))
+  {
+    return;
+  }
+
+  MotorControl_SixStepTick();
 }
