@@ -12,10 +12,15 @@ extern "C" {
 #define CURRENT_SENSE_SAMPLE_COUNT 4000U
 
 /**
- * @brief Prepare the three OPAMPs and calibrate both ADCs.
+ * @brief Prepare OPAMPs/ADCs and measure startup zero-current offsets.
  *
  * ADC1 is expected to be the master and ADC2 the slave of the injected
  * simultaneous conversion configured by CubeMX.
+ * Call before enabling motor PWM, with zero phase current. Blocks until
+ * 64 VREFINT readings and 1000 zero-current sample sets are captured
+ * (or timeout). ADC1 regular rank 1 must be VREFINT with adequate sampling
+ * time. Raw samples remain packed in RAM; CSV converts them to amperes
+ * using the per-rank offset and startup VREF+ calibration.
  */
 HAL_StatusTypeDef CurrentSense_Init(ADC_HandleTypeDef *master_adc,
                                     ADC_HandleTypeDef *slave_adc,
