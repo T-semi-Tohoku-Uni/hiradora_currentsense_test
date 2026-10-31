@@ -4,6 +4,7 @@
 #include "motor_control.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -62,6 +63,10 @@ static bool timer_started_for_capture;
 static uint32_t acquisition_sample_count;
 static float offsets[4]; /* U1, V, U2, W, in ADC counts. */
 static float amps_per_count;
+/* One snapshot per capture, not per-sample float/current storage. Commands
+ * cannot change the drive while capturing; interrupted captures are rejected. */
+static const char *capture_mode;
+static float capture_duty;
 
 _Static_assert(CURRENT_SENSE_OFFSET_SAMPLE_COUNT <= CURRENT_SENSE_SAMPLE_COUNT,
                "Offset samples must fit in the capture buffer");
@@ -217,6 +222,11 @@ static HAL_StatusTypeDef CurrentSense_StartAcquisition(uint32_t sample_count)
 
   captured_sample_count = 0U;
   acquisition_sample_count = sample_count;
+  const uint32_t interrupt_state = __get_PRIMASK();
+  __disable_irq();
+  capture_mode = MotorControl_GetModeName();
+  capture_duty = MotorControl_GetTestDuty();
+  if (interrupt_state == 0U) { __enable_irq(); }
   memset(sample_sectors, 0, sizeof(sample_sectors));
   current_state = CURRENT_SENSE_ACQUIRING;
 
@@ -270,7 +280,7 @@ static HAL_StatusTypeDef CurrentSense_StopAcquisition(void)
 static void CurrentSense_BeginCsv(void)
 {
   static const char csv_header[] =
-    "sample,sector,u1_a,v_a,u2_a,w_a\r\n";
+    "sample,mode,duty,sector,u1_raw,v_raw,u2_raw,w_raw,u1_current,v_current,u2_current,w_current\r\n";
 
   transmit_sample_index = 0U;
   (void)Console_Write(csv_header, sizeof(csv_header) - 1U);
@@ -278,16 +288,21 @@ static void CurrentSense_BeginCsv(void)
 
 static bool CurrentSense_SendNextCsvLine(void)
 {
-  char line[64];
+  char line[160];
 
   if (transmit_sample_index < CURRENT_SENSE_SAMPLE_COUNT)
   {
     const uint32_t index = transmit_sample_index;
     const int length = snprintf(line,
                                 sizeof(line),
-                                "%lu,%u,%.3f,%.3f,%.3f,%.3f\r\n",
+                                "%lu,%s,%.3f,%u,%u,%u,%u,%u,%.3f,%.3f,%.3f,%.3f\r\n",
                                 (unsigned long)index,
+                                capture_mode, (double)capture_duty,
                                 (unsigned int)CurrentSense_GetSector(index),
+                                (unsigned int)CurrentSense_GetU1Raw(&samples[index]),
+                                (unsigned int)CurrentSense_GetVRaw(&samples[index]),
+                                (unsigned int)CurrentSense_GetU2Raw(&samples[index]),
+                                (unsigned int)CurrentSense_GetWRaw(&samples[index]),
                                 (double)(((float)CurrentSense_GetU1Raw(&samples[index]) - offsets[0]) * amps_per_count),
                                 (double)(((float)CurrentSense_GetVRaw(&samples[index]) - offsets[1]) * amps_per_count),
                                 (double)(((float)CurrentSense_GetU2Raw(&samples[index]) - offsets[2]) * amps_per_count),
@@ -540,6 +555,7 @@ bool CurrentSense_ProcessCommand(const char *command)
   status = CurrentSense_StartAcquisition(CURRENT_SENSE_SAMPLE_COUNT);
   if (status != HAL_OK)
   {
+    MotorControl_Stop();
     printf("ADC capture start failed: HAL status=%d\r\n", (int)status);
   }
   else
@@ -553,8 +569,20 @@ bool CurrentSense_ProcessCommand(const char *command)
 
 void CurrentSense_Task(void)
 {
+  if ((current_state == CURRENT_SENSE_ACQUIRING) &&
+      (READ_BIT(sample_timer->Instance->CR1, TIM_CR1_CEN) == 0U))
+  {
+    current_state = CURRENT_SENSE_TRANSMITTING;
+    MotorControl_Stop();
+    (void)CurrentSense_StopAcquisition();
+    printf("ADC capture aborted: PWM stopped (stop/fault/current limit/timeout); samples=%lu\r\n",
+           (unsigned long)captured_sample_count);
+    current_state = CURRENT_SENSE_IDLE;
+    return;
+  }
   if (current_state == CURRENT_SENSE_SYNC_ERROR)
   {
+    MotorControl_Stop();
     const uint32_t adc2_isr = adc_slave->Instance->ISR;
     const uint32_t adc2_ier = adc_slave->Instance->IER;
 
@@ -578,6 +606,7 @@ void CurrentSense_Task(void)
     }
 
     const uint32_t timer_count = sample_timer->Instance->CNT;
+    MotorControl_Stop();
     const uint32_t adc1_isr = adc_master->Instance->ISR;
     const uint32_t adc1_cr = adc_master->Instance->CR;
     const uint32_t adc1_ier = adc_master->Instance->IER;
@@ -620,6 +649,7 @@ void CurrentSense_Task(void)
 
   if (CurrentSense_StopAcquisition() != HAL_OK)
   {
+    MotorControl_Stop();
     printf("ADC capture stop failed\r\n");
     current_state = CURRENT_SENSE_IDLE;
     return;
@@ -652,6 +682,10 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
   {
     return;
   }
+  if (READ_BIT(sample_timer->Instance->CR1, TIM_CR1_CEN) == 0U)
+  {
+    return; /* Discard a pending conversion after an emergency stop. */
+  }
 
   /*
    * The ADC1 JEOS interrupt indicates that its two-rank sequence is complete.
@@ -667,6 +701,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 
   if (wait_count == 0U)
   {
+    MotorControl_Stop();
     __HAL_ADC_DISABLE_IT(adc_master, ADC_IT_JEOC | ADC_IT_JEOS);
     current_state = CURRENT_SENSE_SYNC_ERROR;
     return;
@@ -686,6 +721,18 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     (uint16_t)HAL_ADCEx_InjectedGetValue(adc_master, ADC_INJECTED_RANK_2);
   w_raw =
     (uint16_t)HAL_ADCEx_InjectedGetValue(adc_slave, ADC_INJECTED_RANK_2);
+  /* Compare in raw-count units; do not build/store current samples in RAM.
+   * This supplementary trip is active only during static-test acquisition. */
+  const float current_limit_counts = MOTOR_CONTROL_CURRENT_TEST_MAX_CURRENT_A / amps_per_count;
+  if ((capture_duty > 0.0f) &&
+      ((fabsf((float)u1_raw - offsets[0]) > current_limit_counts) ||
+       (fabsf((float)v_raw - offsets[1]) > current_limit_counts) ||
+       (fabsf((float)u2_raw - offsets[2]) > current_limit_counts) ||
+       (fabsf((float)w_raw - offsets[3]) > current_limit_counts)))
+  {
+    MotorControl_Stop();
+    return;
+  }
   CurrentSense_StoreSample(&samples[index],
                            u1_raw,
                            v_raw,
@@ -703,5 +750,15 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
     __HAL_ADC_DISABLE_IT(adc_master, ADC_IT_JEOC | ADC_IT_JEOS);
     __HAL_ADC_DISABLE_IT(adc_slave, ADC_IT_JEOC | ADC_IT_JEOS);
     current_state = CURRENT_SENSE_DATA_READY;
+  }
+}
+
+void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
+{
+  if (((hadc == adc_master) || (hadc == adc_slave)) &&
+      (current_state == CURRENT_SENSE_ACQUIRING))
+  {
+    MotorControl_Stop();
+    current_state = CURRENT_SENSE_SYNC_ERROR;
   }
 }

@@ -7,6 +7,11 @@
 /* Charge all three bootstrap capacitors before each PWM start. */
 #define MOTOR_CONTROL_BOOTSTRAP_CHARGE_US           750U
 
+/* User-selected ceiling at 24 V; winding resistance is unknown.
+ * Static differential duty uses 0.1 % units; 50 = 5 %. Not a current limit. */
+#define MOTOR_CONTROL_CURRENT_TEST_MAX_DUTY_X10     50U
+#define MOTOR_CONTROL_CURRENT_TEST_MAX_CURRENT_A    5.0f
+
 /*
  * Six-step duty profile. Duty values use 0.1 % units (50 = 5.0 %).
  *

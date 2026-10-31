@@ -257,11 +257,12 @@ int main(void)
   }
   else
   {
-    printf("TIM1 three-phase PWM started at U=V=W=50.00 %%\r\n");
+    printf("TIM1 ready: PWM OFF, current_test duty=0\r\n");
   }
   AS5047P_Init(&hspi1);
   printf("Command: <offset>, u/v/w <offset>, mid, stop, start, "
-         "run cw/ccw <rpm>, status, adc, ntc, ntc stop, angle, angle stop, fault, fault clear\r\n");
+         "run cw/ccw <rpm>, current_test off|uv_pos|uv_neg|vw_pos|vw_neg|wu_pos|wu_neg|duty <0..0.05>, "
+         "status, adc, ntc, ntc stop, angle, angle stop, fault, fault clear\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -281,7 +282,7 @@ int main(void)
       {
         if (!MotorControl_ProcessStopCommand(motor_command))
         {
-          printf("ADC capture/transfer is busy; only 'stop' is accepted\r\n");
+          printf("ADC capture/transfer is busy; only 'stop' or 'current_test off' is accepted\r\n");
         }
       }
       else if (!ProcessGateDriverFaultCommand(motor_command) &&
@@ -596,7 +597,7 @@ static void MX_OPAMP1_Init(void)
   hopamp1.Init.InternalOutput = ENABLE;
   hopamp1.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
   hopamp1.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
-  hopamp1.Init.PgaGain = OPAMP_PGA_GAIN_8_OR_MINUS_7;
+  hopamp1.Init.PgaGain = OPAMP_PGA_GAIN_16_OR_MINUS_15;
   hopamp1.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
   if (HAL_OPAMP_Init(&hopamp1) != HAL_OK)
   {
@@ -630,7 +631,7 @@ static void MX_OPAMP2_Init(void)
   hopamp2.Init.InternalOutput = ENABLE;
   hopamp2.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
   hopamp2.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
-  hopamp2.Init.PgaGain = OPAMP_PGA_GAIN_8_OR_MINUS_7;
+  hopamp2.Init.PgaGain = OPAMP_PGA_GAIN_16_OR_MINUS_15;
   hopamp2.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
   if (HAL_OPAMP_Init(&hopamp2) != HAL_OK)
   {
@@ -664,7 +665,7 @@ static void MX_OPAMP3_Init(void)
   hopamp3.Init.InternalOutput = ENABLE;
   hopamp3.Init.TimerControlledMuxmode = OPAMP_TIMERCONTROLLEDMUXMODE_DISABLE;
   hopamp3.Init.PgaConnect = OPAMP_PGA_CONNECT_INVERTINGINPUT_IO0_BIAS;
-  hopamp3.Init.PgaGain = OPAMP_PGA_GAIN_8_OR_MINUS_7;
+  hopamp3.Init.PgaGain = OPAMP_PGA_GAIN_16_OR_MINUS_15;
   hopamp3.Init.UserTrimming = OPAMP_TRIMMING_FACTORY;
   if (HAL_OPAMP_Init(&hopamp3) != HAL_OK)
   {
@@ -986,6 +987,7 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
+  MotorControl_Stop();
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)

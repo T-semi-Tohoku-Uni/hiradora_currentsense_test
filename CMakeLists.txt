@@ -37,6 +37,18 @@ add_executable(${CMAKE_PROJECT_NAME})
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
+# Some CubeMX exports omit drivers used by the existing application.
+# Add only missing sources without editing the generated source list.
+get_target_property(hiradora_hal_sources STM32_Drivers SOURCES)
+foreach(hiradora_driver IN ITEMS adc adc_ex i2c i2c_ex opamp opamp_ex spi spi_ex uart uart_ex)
+    set(hiradora_driver_name "stm32g4xx_hal_${hiradora_driver}.c")
+    string(FIND "${hiradora_hal_sources}" "${hiradora_driver_name}" hiradora_driver_index)
+    if(hiradora_driver_index EQUAL -1)
+        target_sources(STM32_Drivers PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32G4xx_HAL_Driver/Src/${hiradora_driver_name}")
+    endif()
+endforeach()
+
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths

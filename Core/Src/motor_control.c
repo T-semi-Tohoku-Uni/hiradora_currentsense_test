@@ -56,6 +56,7 @@ typedef enum
 {
   MOTOR_CONTROL_MODE_STOPPED = 0,
   MOTOR_CONTROL_MODE_MANUAL,
+  MOTOR_CONTROL_MODE_CURRENT_TEST,
   MOTOR_CONTROL_MODE_SIX_STEP_ALIGNMENT,
   MOTOR_CONTROL_MODE_SIX_STEP_RAMP,
   MOTOR_CONTROL_MODE_SIX_STEP_RUNNING
@@ -71,7 +72,7 @@ static TIM_HandleTypeDef *motor_timer;
 static I2C_HandleTypeDef *gate_driver_i2c;
 static MotorControlPhase selected_phase = MOTOR_CONTROL_PHASE_U;
 static float selected_offset_percent;
-static bool outputs_enabled;
+static volatile bool outputs_enabled;
 static volatile MotorControlMode motor_mode = MOTOR_CONTROL_MODE_STOPPED;
 static volatile uint8_t current_sector;
 static volatile uint32_t reference_rpm;
@@ -83,6 +84,12 @@ static uint32_t alignment_ticks_remaining;
 static uint32_t ramp_elapsed_ticks;
 static uint32_t ramp_total_ticks;
 static uint32_t commutation_accumulator;
+static volatile uint8_t test_sector;
+static volatile uint32_t test_duty_x10;
+
+_Static_assert(MOTOR_CONTROL_CURRENT_TEST_MAX_DUTY_X10 > 0U &&
+               MOTOR_CONTROL_CURRENT_TEST_MAX_DUTY_X10 <= 50U,
+               "Review hardware limits before increasing static duty above 5%");
 
 static const char *MotorControl_SkipSpaces(const char *text)
 {
@@ -358,10 +365,9 @@ static uint32_t MotorControl_SixStepCompare(uint32_t duty_x10)
   return compare;
 }
 
-static void MotorControl_ApplySixStepSector(uint8_t sector)
+static void MotorControl_ApplySector(uint8_t sector, uint32_t duty_x10)
 {
   TIM_TypeDef *tim = motor_timer->Instance;
-  const uint32_t duty_x10 = MotorControl_SixStepDutyX10();
   const uint32_t pwm_compare = MotorControl_SixStepCompare(duty_x10);
   /* Center both active phases around 50%, preserving the compare difference
    * even when it is odd. Each phase uses complementary high/low-side PWM. */
@@ -424,6 +430,16 @@ static void MotorControl_ApplySixStepSector(uint8_t sector)
   interrupt_state = __get_PRIMASK();
   __disable_irq();
 
+  if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_15) == GPIO_PIN_RESET)
+  {
+    MotorControl_Stop();
+    if (interrupt_state == 0U)
+    {
+      __enable_irq();
+    }
+    return;
+  }
+
   /* Blank all phases while preload values and output enables are changed. */
   CLEAR_BIT(tim->BDTR, TIM_BDTR_MOE);
   CLEAR_BIT(tim->CCER, MOTOR_CONTROL_OUTPUT_ENABLE_MASK);
@@ -459,7 +475,7 @@ static void MotorControl_AdvanceSector(void)
     next_sector = (next_sector <= 1U) ? 6U : (uint8_t)(next_sector - 1U);
   }
 
-  MotorControl_ApplySixStepSector(next_sector);
+  MotorControl_ApplySector(next_sector, MotorControl_SixStepDutyX10());
 }
 
 static void MotorControl_SixStepTick(void)
@@ -540,13 +556,12 @@ static void MotorControl_StartSixStep(MotorControlDirection direction,
   outputs_enabled = true;
   motor_mode = MOTOR_CONTROL_MODE_SIX_STEP_ALIGNMENT;
   __HAL_TIM_SET_COUNTER(motor_timer, 0U);
+  MotorControl_ApplySector(1U, MotorControl_SixStepDutyX10());
 
   if (interrupt_state == 0U)
   {
     __enable_irq();
   }
-
-  MotorControl_ApplySixStepSector(1U);
 
   printf("Six-step started: direction=%s, target=%lu rpm, "
          "duty_start=%lu.%lu %%, duty_target=%lu.%lu %%, "
@@ -620,6 +635,106 @@ static bool MotorControl_ParseRunCommand(const char *command)
   }
 
   MotorControl_StartSixStep(direction, (uint32_t)parsed_rpm);
+  return true;
+}
+
+/* Match a command word without reading beyond a short input string. */
+static const char *MotorControl_AfterWord(const char *text, const char *word)
+{
+  while (*word != '\0')
+  {
+    if (tolower((unsigned char)*text) != (unsigned char)*word++)
+    {
+      return NULL;
+    }
+    text++;
+  }
+  if ((*text != '\0') && !isspace((unsigned char)*text))
+  {
+    return NULL;
+  }
+  return MotorControl_SkipSpaces(text);
+}
+
+static const char *MotorControl_TestName(uint8_t sector)
+{
+  static const char *const names[] =
+    {"off", "uv_pos", "wu_neg", "vw_pos", "uv_neg", "wu_pos", "vw_neg"};
+  return names[(sector <= 6U) ? sector : 0U];
+}
+
+static void MotorControl_StartCurrentTest(uint8_t sector, uint32_t duty_x10)
+{
+  /* Also blank duty changes. Neither an old vector nor a stale duty survives
+   * stop/fault. Zero duty never enables even the bootstrap pulse. */
+  MotorControl_Stop();
+  if ((sector != 0U) && (duty_x10 != 0U))
+  {
+    if (MotorControl_PreparePwmStart() != HAL_OK)
+    {
+      return;
+    }
+    const uint32_t interrupt_state = __get_PRIMASK();
+    __disable_irq();
+    motor_mode = MOTOR_CONTROL_MODE_CURRENT_TEST;
+    outputs_enabled = true;
+    MotorControl_ApplySector(sector, duty_x10);
+    if (!outputs_enabled)
+    {
+      if (interrupt_state == 0U) { __enable_irq(); }
+      printf("Current test start blocked by nFAULT\r\n");
+      return;
+    }
+    test_sector = sector;
+    test_duty_x10 = duty_x10;
+    if (interrupt_state == 0U) { __enable_irq(); }
+  }
+  else
+  {
+    test_sector = sector;
+    test_duty_x10 = duty_x10;
+  }
+  printf("Current test: selected=%s, duty=%.3f, PWM=%s, timeout=disabled\r\n",
+         MotorControl_TestName(test_sector), (double)test_duty_x10 / 1000.0,
+         outputs_enabled ? "on" : "off");
+}
+
+static bool MotorControl_ParseCurrentTest(const char *command)
+{
+  const char *argument = MotorControl_AfterWord(command, "current_test");
+  if (argument == NULL) { return false; }
+  if (MotorControl_IsCommand(argument, "off"))
+  {
+    MotorControl_Stop();
+    printf("Current test off; duty reset to zero\r\n");
+    return true;
+  }
+  const char *value = MotorControl_AfterWord(argument, "duty");
+  if (value != NULL)
+  {
+    char *end;
+    errno = 0;
+    const float duty = strtof(value, &end);
+    if ((end == value) || errno == ERANGE || !isfinite(duty) ||
+        (*MotorControl_SkipSpaces(end) != '\0') || duty < 0.0f ||
+        duty > (float)MOTOR_CONTROL_CURRENT_TEST_MAX_DUTY_X10 / 1000.0f)
+    {
+      printf("Duty must be finite and between 0 and %.3f\r\n",
+             (double)MOTOR_CONTROL_CURRENT_TEST_MAX_DUTY_X10 / 1000.0);
+      return true;
+    }
+    MotorControl_StartCurrentTest(test_sector, (uint32_t)(duty * 1000.0f + 0.5f));
+    return true;
+  }
+  for (uint8_t sector = 1U; sector <= 6U; sector++)
+  {
+    if (MotorControl_IsCommand(argument, MotorControl_TestName(sector)))
+    {
+      MotorControl_StartCurrentTest(sector, test_duty_x10);
+      return true;
+    }
+  }
+  printf("Usage: current_test off|uv_pos|uv_neg|vw_pos|vw_neg|wu_pos|wu_neg|duty <0..0.05>\r\n");
   return true;
 }
 
@@ -719,7 +834,8 @@ HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim,
   selected_phase = MOTOR_CONTROL_PHASE_U;
   __HAL_TIM_CLEAR_FLAG(motor_timer, TIM_FLAG_UPDATE);
   __HAL_TIM_ENABLE_IT(motor_timer, TIM_IT_UPDATE);
-  return MotorControl_StartAtMidpoint();
+  MotorControl_Stop();
+  return HAL_OK;
 }
 
 bool MotorControl_ProcessCommand(const char *command)
@@ -734,6 +850,11 @@ bool MotorControl_ProcessCommand(const char *command)
   }
 
   command = MotorControl_SkipSpaces(command);
+
+  if (MotorControl_ParseCurrentTest(command))
+  {
+    return true;
+  }
 
   if (MotorControl_ParseRunCommand(command))
   {
@@ -758,10 +879,9 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (MotorControl_IsCommand(command, "mid"))
   {
-    if (MotorControl_IsSixStepMode(motor_mode))
+    if (motor_mode != MOTOR_CONTROL_MODE_MANUAL)
     {
-      printf("Manual PWM is unavailable during six-step drive; send 'stop' "
-             "or 'start' first\r\n");
+      printf("Manual PWM requires 'start' first\r\n");
       return true;
     }
     if (!outputs_enabled)
@@ -777,7 +897,13 @@ bool MotorControl_ProcessCommand(const char *command)
 
   if (MotorControl_IsCommand(command, "status"))
   {
-    if (MotorControl_IsSixStepMode(motor_mode))
+    if (motor_mode == MOTOR_CONTROL_MODE_CURRENT_TEST)
+    {
+      printf("PWM: current_test %s, duty=%.3f\r\n",
+             MotorControl_TestName(current_sector),
+             (double)current_duty_x10 / 1000.0);
+    }
+    else if (MotorControl_IsSixStepMode(motor_mode))
     {
       printf("PWM: six-step, stage=%s, direction=%s, target=%lu rpm, "
              "reference=%lu rpm, sector=%u, duty=%lu.%lu %%\r\n",
@@ -823,10 +949,9 @@ bool MotorControl_ProcessCommand(const char *command)
     return false;
   }
 
-  if (MotorControl_IsSixStepMode(motor_mode))
+  if (motor_mode != MOTOR_CONTROL_MODE_MANUAL)
   {
-    printf("Manual PWM is unavailable during six-step drive; send 'stop' "
-           "or 'start' first\r\n");
+    printf("Manual PWM requires 'start' first\r\n");
     return true;
   }
 
@@ -848,7 +973,9 @@ bool MotorControl_ProcessStopCommand(const char *command)
   }
 
   command = MotorControl_SkipSpaces(command);
-  if (!MotorControl_IsCommand(command, "stop"))
+  const char *argument = MotorControl_AfterWord(command, "current_test");
+  if (!MotorControl_IsCommand(command, "stop") &&
+      ((argument == NULL) || !MotorControl_IsCommand(argument, "off")))
   {
     return false;
   }
@@ -878,13 +1005,34 @@ void MotorControl_Stop(void)
   reference_rpm = 0U;
   current_duty_x10 = 0U;
   motor_mode = MOTOR_CONTROL_MODE_STOPPED;
+  test_sector = 0U;
+  test_duty_x10 = 0U;
+  outputs_enabled = false;
 
   if (interrupt_state == 0U)
   {
     __enable_irq();
   }
+}
 
-  outputs_enabled = false;
+const char *MotorControl_GetModeName(void)
+{
+  if (motor_mode == MOTOR_CONTROL_MODE_CURRENT_TEST)
+  {
+    return MotorControl_TestName(current_sector);
+  }
+  if (MotorControl_IsSixStepMode(motor_mode)) { return "six_step"; }
+  return (motor_mode == MOTOR_CONTROL_MODE_MANUAL) ? "manual" : "off";
+}
+
+float MotorControl_GetTestDuty(void)
+{
+  if (motor_mode == MOTOR_CONTROL_MODE_CURRENT_TEST)
+  {
+    return (float)current_duty_x10 / 1000.0f;
+  }
+  /* Legacy drive duty is not constant over an acquisition. */
+  return (motor_mode == MOTOR_CONTROL_MODE_STOPPED) ? 0.0f : NAN;
 }
 
 uint8_t MotorControl_GetSector(void)
@@ -894,10 +1042,21 @@ uint8_t MotorControl_GetSector(void)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if ((htim != motor_timer) || !MotorControl_IsSixStepMode(motor_mode))
+  if (htim != motor_timer)
   {
     return;
   }
+
+  /* No I2C or printing in this ISR. Check even at counter top so fault
+   * handling does not depend on console/main-loop work. */
+  if (outputs_enabled &&
+      ((HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_15) == GPIO_PIN_RESET) ||
+       (READ_BIT(motor_timer->Instance->BDTR, TIM_BDTR_MOE) == 0U)))
+  {
+    MotorControl_Stop();
+    return;
+  }
+  if (!MotorControl_IsSixStepMode(motor_mode)) { return; }
 
   /* In center-aligned mode, process only the update event at counter bottom. */
   if (__HAL_TIM_GET_COUNTER(motor_timer) >

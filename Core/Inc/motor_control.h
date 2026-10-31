@@ -18,7 +18,7 @@ typedef enum
 } MotorControlPhase;
 
 /**
- * @brief Charge bootstraps, clear faults, then start PWM at 50% duty.
+ * @brief Initialize the controller with all PWM outputs OFF and test duty zero.
  * @param htim Advanced-control timer with CH1/CH1N through CH3/CH3N.
  * @param hi2c Gate-driver I2C handle. Failed starts leave PWM stopped.
  */
@@ -39,13 +39,15 @@ HAL_StatusTypeDef MotorControl_Init(TIM_HandleTypeDef *htim,
  *   run cw <rpm>    Start clockwise open-loop six-step drive.
  *   run ccw <rpm>   Start counter-clockwise open-loop six-step drive.
  *   status      Print the current state.
+ *   current_test off|uv_pos|uv_neg|vw_pos|vw_neg|wu_pos|wu_neg
+ *   current_test duty <fraction>  Static differential duty, 0..0.05.
  *
  * @return true when the command was valid, otherwise false.
  */
 bool MotorControl_ProcessCommand(const char *command);
 
 /**
- * @brief Process only the emergency "stop" command.
+ * @brief Process emergency "stop" or "current_test off", even during capture.
  * @return true when a stop command was handled.
  */
 bool MotorControl_ProcessStopCommand(const char *command);
@@ -60,6 +62,11 @@ void MotorControl_Stop(void);
  * from the ADC interrupt.
  */
 uint8_t MotorControl_GetSector(void);
+
+/** Capture metadata; copy together with interrupts masked. */
+const char *MotorControl_GetModeName(void);
+/** Static differential duty; zero when off, NAN for legacy drive modes. */
+float MotorControl_GetTestDuty(void);
 
 #ifdef __cplusplus
 }
